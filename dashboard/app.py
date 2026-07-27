@@ -29,11 +29,29 @@ def get_db_path() -> str:
 
 
 @st.cache_data(ttl=300)
-def load_player_list(db_path: str) -> pd.DataFrame:
+def load_teams(db_path: str) -> list:
     conn = sqlite3.connect(db_path)
-    df = pd.read_sql(
-        "SELECT DISTINCT player_id, player_name FROM dim_player ORDER BY player_name", conn
-    )
+    teams = pd.read_sql(
+        "SELECT DISTINCT team FROM fact_player_game ORDER BY team", conn
+    )["team"].tolist()
+    conn.close()
+    return teams
+
+
+@st.cache_data(ttl=300)
+def load_player_list(db_path: str, team: str = None) -> pd.DataFrame:
+    conn = sqlite3.connect(db_path)
+    if team:
+        df = pd.read_sql(
+            """SELECT DISTINCT p.player_id, p.player_name
+               FROM dim_player p JOIN fact_player_game f ON f.player_id = p.player_id
+               WHERE f.team = ? ORDER BY p.player_name""",
+            conn, params=(team,),
+        )
+    else:
+        df = pd.read_sql(
+            "SELECT DISTINCT player_id, player_name FROM dim_player ORDER BY player_name", conn
+        )
     conn.close()
     return df
 
@@ -70,6 +88,47 @@ def add_hot_cold(played: pd.DataFrame, stat: str) -> pd.DataFrame:
     return played
 
 
+def add_dnp_markers(fig, dnp_games: pd.DataFrame, y_value=0):
+    """Adds a visible marker for each DNP game at a fixed y (default 0) so
+    missed games show up on the same timeline as everything else, instead
+    of just silently vanishing from the chart."""
+    if dnp_games.empty:
+        return
+    fig.add_scatter(
+        x=dnp_games["game_date"], y=[y_value] * len(dnp_games), mode="markers",
+        name="DNP", marker=dict(symbol="x", size=11, color="black", line=dict(width=2)),
+        text=[f"DNP vs {opp}" for opp in dnp_games["opponent"]], hoverinfo="text+x",
+    )
+
+
+MAJOR_STATS = {"Points": "pts", "Rebounds": "reb_tot", "Assists": "ast",
+               "Steals": "stl", "Blocks": "blk", "Turnovers": "tov"}
+
+
+def rolling_prior_averages(season_df: pd.DataFrame, stat_col: str) -> pd.DataFrame:
+    """Leakage-safe L5/L14D averages entering each game (played or DNP),
+    computed the same way as compute_features.py's prior-averages: only
+    games strictly before the current row count. DNP games are skipped
+    when accumulating but still get a value here (using whatever the
+    average was heading into that game), so the line continues across
+    DNP gaps instead of stopping. Only points/rebounds/assists have this
+    precomputed in the database -- this covers every other stat too."""
+    df = season_df.sort_values("game_date").reset_index(drop=True)
+    played_so_far = []  # list of (date, value), non-DNP only
+    l5_vals, l14d_vals = [], []
+    for _, row in df.iterrows():
+        window_start = row["game_date"] - pd.Timedelta(days=14)
+        last5 = played_so_far[-5:]
+        l14d = [v for d, v in played_so_far if d >= window_start]
+        l5_vals.append(sum(v for _, v in last5) / len(last5) if last5 else None)
+        l14d_vals.append(sum(l14d) / len(l14d) if l14d else None)
+        if row["dnp"] == 0:
+            played_so_far.append((row["game_date"], row[stat_col]))
+    df["_l5_prior"] = l5_vals
+    df["_l14d_prior"] = l14d_vals
+    return df
+
+
 def streak(flags: pd.Series) -> int:
     """Current (most recent) consecutive-True streak, reading backward from the end."""
     count = 0
@@ -83,15 +142,41 @@ def streak(flags: pd.Series) -> int:
     return count
 
 
-def hit_rate_table(played: pd.DataFrame, thresholds=(10, 15, 20)) -> pd.DataFrame:
-    """Overall + home/away split hit-rate for each scoring threshold."""
+THRESHOLD_STAT_OPTIONS = {
+    "Points": ("pts", (5, 10, 15, 20, 25, 30), "pts"),
+    "Rebounds": ("reb_tot", (2, 4, 6, 8, 10), "reb"),
+    "Assists": ("ast", (2, 4, 6, 8), "ast"),
+    "Steals": ("stl", (1, 2, 3), "stl"),
+    "Blocks": ("blk", (1, 2, 3), "blk"),
+    "Turnovers": ("tov", (1, 2, 3, 4), "tov"),
+}
+
+
+def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) -> pd.DataFrame:
+    """Hit-rate for each threshold, split several ways: overall, home/away,
+    and recent form (last 5 played games, last 14 calendar days) -- the
+    same L5/L14D windows used elsewhere in the dashboard, so this lines up
+    with the rolling-average and streak charts. Computed directly from the
+    raw stat column (not precomputed flag columns) so any threshold for
+    any stat can be added here without a schema change."""
+    played = played.sort_values("game_date")
+    last5 = played.tail(5)
+    most_recent_date = played["game_date"].max()
+    last14d = played[played["game_date"] >= most_recent_date - pd.Timedelta(days=14)]
+
     rows = []
     for t in thresholds:
-        col = f"pts_{t}plus"
-        overall = played[col].mean() * 100 if len(played) else None
-        home = played.loc[played.home_away == "H", col].mean() * 100 if (played.home_away == "H").any() else None
-        away = played.loc[played.home_away == "A", col].mean() * 100 if (played.home_away == "A").any() else None
-        rows.append({"Threshold": f"{t}+ pts", "Overall": overall, "Home": home, "Away": away})
+        hit = played[stat_col] >= t
+        home_mask = played.home_away == "H"
+        away_mask = played.home_away == "A"
+        rows.append({
+            "Threshold": f"{t}+ {label}",
+            "Overall": hit.mean() * 100 if len(played) else None,
+            "Home": hit[home_mask].mean() * 100 if home_mask.any() else None,
+            "Away": hit[away_mask].mean() * 100 if away_mask.any() else None,
+            "Last 5": (last5[stat_col] >= t).mean() * 100 if len(last5) else None,
+            "Last 14 Days": (last14d[stat_col] >= t).mean() * 100 if len(last14d) else None,
+        })
     return pd.DataFrame(rows)
 
 
@@ -99,12 +184,17 @@ def main():
     st.set_page_config(page_title="WNBA Player Stats Dashboard", layout="wide")
     db_path = get_db_path()
 
-    players = load_player_list(db_path)
+    st.sidebar.title("Player Selection")
+
+    teams = load_teams(db_path)
+    team_choice = st.sidebar.selectbox("Team", ["All Teams"] + teams)
+    selected_team = None if team_choice == "All Teams" else team_choice
+
+    players = load_player_list(db_path, team=selected_team)
     if players.empty:
         st.error(f"No players found in {db_path}. Run seed_mock_data.py first.")
         return
 
-    st.sidebar.title("Player Selection")
     player_name = st.sidebar.selectbox("Player", players["player_name"])
     player_id = int(players.loc[players.player_name == player_name, "player_id"].iloc[0])
 
@@ -114,6 +204,7 @@ def main():
 
     season_df = df[df.season == season].reset_index(drop=True)
     played = season_df[season_df.dnp == 0].copy()
+    dnp_games = season_df[season_df.dnp == 1].copy()
 
     if played.empty:
         st.warning("No played games for this player/season yet.")
@@ -142,21 +233,54 @@ def main():
     # ---------------------------------------------------------------
     # Threshold hit-rates
     # ---------------------------------------------------------------
-    st.subheader("Scoring Threshold Hit-Rates")
-    st.caption("% of played games this season clearing each points threshold, split by home/away")
+    st.subheader("Threshold Hit-Rates")
+    st.caption("% of played games clearing each threshold -- overall, home/away, and recent form "
+               "(last 5 games, last 14 days) -- same L5/L14D windows used in the rolling and streak charts below.")
 
-    hr = hit_rate_table(played)
+    threshold_stat_label = st.selectbox("Stat", list(THRESHOLD_STAT_OPTIONS.keys()), key="threshold_stat")
+    threshold_col, thresholds, threshold_short_label = THRESHOLD_STAT_OPTIONS[threshold_stat_label]
+
+    hr = hit_rate_table(played, threshold_col, thresholds, threshold_short_label)
     fig = go.Figure()
     fig.add_bar(name="Home", x=hr["Threshold"], y=hr["Home"])
     fig.add_bar(name="Away", x=hr["Threshold"], y=hr["Away"])
     fig.add_bar(name="Overall", x=hr["Threshold"], y=hr["Overall"], marker_color="lightgray", opacity=0.6)
-    fig.update_layout(barmode="group", yaxis_title="Hit rate (%)", yaxis_range=[0, 100], height=380)
+    fig.add_bar(name="Last 5", x=hr["Threshold"], y=hr["Last 5"], marker_color="orange")
+    fig.add_bar(name="Last 14 Days", x=hr["Threshold"], y=hr["Last 14 Days"], marker_color="red")
+    fig.update_layout(barmode="group", yaxis_title="Hit rate (%)", yaxis_range=[0, 100], height=420,
+                       legend=dict(orientation="h", y=1.15))
     st.plotly_chart(fig, width='stretch')
 
     st.dataframe(
-        hr.style.format({"Overall": "{:.0f}%", "Home": "{:.0f}%", "Away": "{:.0f}%"}),
+        hr.style.format({c: "{:.0f}%" for c in ["Overall", "Home", "Away", "Last 5", "Last 14 Days"]}),
         hide_index=True, width='stretch',
     )
+
+    st.divider()
+
+    # ---------------------------------------------------------------
+    # Stat trend (single stat, selectable) -- moved up per request, right
+    # below Threshold Hit-Rates
+    # ---------------------------------------------------------------
+    st.subheader("Stat Trend")
+    trend_stat_label = st.selectbox("Stat", list(MAJOR_STATS.keys()), key="trend_stat")
+    trend_stat_col = MAJOR_STATS[trend_stat_label]
+
+    rolling_df = rolling_prior_averages(season_df, trend_stat_col)
+    played_rolling = rolling_df[rolling_df.dnp == 0]
+
+    fig_trend = go.Figure()
+    fig_trend.add_scatter(x=played_rolling["game_date"], y=played_rolling[trend_stat_col],
+                           name=trend_stat_label, mode="lines+markers")
+    fig_trend.add_scatter(x=rolling_df["game_date"], y=rolling_df["_l5_prior"],
+                           name="L5 avg (entering)", mode="lines", line=dict(dash="dot", color="orange"))
+    fig_trend.add_scatter(x=rolling_df["game_date"], y=rolling_df["_l14d_prior"],
+                           name="L14D avg (entering)", mode="lines", line=dict(dash="dot", color="red"))
+    add_dnp_markers(fig_trend, dnp_games)
+    fig_trend.update_layout(height=380, yaxis_title=trend_stat_label, legend=dict(orientation="h", y=1.15))
+    st.plotly_chart(fig_trend, width='stretch')
+    st.caption("Black X = DNP. Rolling lines are leakage-safe (entering each game) and continue "
+               "across DNP gaps, since a missed game doesn't change the average.")
 
     st.divider()
 
@@ -164,21 +288,29 @@ def main():
     # Rolling hot / cold trend
     # ---------------------------------------------------------------
     st.subheader("Rolling Hot / Cold Trend")
-    st.caption("Points per game vs. rolling 5-game and trailing 14-day averages (entering each game, leakage-safe)")
+    hotcoldtrend_stat_label = st.selectbox("Stat", list(MAJOR_STATS.keys()), key="hotcoldtrend_stat")
+    hotcoldtrend_stat_col = MAJOR_STATS[hotcoldtrend_stat_label]
+    st.caption(f"{hotcoldtrend_stat_label} per game vs. rolling 5-game and trailing 14-day averages "
+               f"(entering each game, leakage-safe)")
+
+    hc_rolling_df = rolling_prior_averages(season_df, hotcoldtrend_stat_col)
 
     trend = go.Figure()
-    trend.add_bar(x=played["game_date"], y=played["pts"], name="Points (that game)",
+    trend.add_bar(x=played["game_date"], y=played[hotcoldtrend_stat_col],
+                  name=f"{hotcoldtrend_stat_label} (that game)",
                   marker_color=["#2ca02c" if h == "H" else "#1f77b4" for h in played["home_away"]])
-    trend.add_scatter(x=played["game_date"], y=played["avg_pts_l5_prior"], mode="lines",
+    trend.add_scatter(x=hc_rolling_df["game_date"], y=hc_rolling_df["_l5_prior"], mode="lines",
                        name="Last 5 games avg (entering)", line=dict(color="orange", width=2))
-    trend.add_scatter(x=played["game_date"], y=played["avg_pts_l14d_prior"], mode="lines",
+    trend.add_scatter(x=hc_rolling_df["game_date"], y=hc_rolling_df["_l14d_prior"], mode="lines",
                        name="Last 14 days avg (entering)", line=dict(color="red", width=2, dash="dot"))
-    trend.add_hline(y=played.pts.mean(), line_dash="dash", line_color="gray",
+    add_dnp_markers(trend, dnp_games)
+    trend.add_hline(y=played[hotcoldtrend_stat_col].mean(), line_dash="dash", line_color="gray",
                      annotation_text="Season avg (final)")
-    trend.update_layout(height=420, yaxis_title="Points", legend=dict(orientation="h", y=1.1))
+    trend.update_layout(height=420, yaxis_title=hotcoldtrend_stat_label, legend=dict(orientation="h", y=1.1))
     st.plotly_chart(trend, width='stretch')
-    st.caption("Green bar = home game, blue bar = away game. Rolling lines reflect games "
-               "*entering* each date (leakage-safe).")
+    st.caption("Green bar = home game, blue bar = away game. Black X = DNP. Rolling lines reflect "
+               "games *entering* each date (leakage-safe) and continue across DNP gaps, since a "
+               "missed game doesn't change the average.")
 
     st.divider()
 
@@ -191,7 +323,7 @@ def main():
 
     stat_options = {"Points": "pts", "Rebounds": "reb_tot", "Assists": "ast",
                      "Steals": "stl", "Blocks": "blk", "Game Score": "game_score"}
-    stat_label = st.selectbox("Stat", list(stat_options.keys()))
+    stat_label = st.selectbox("Stat", list(stat_options.keys()), key="hotcold_stat")
     sk = stat_options[stat_label]
 
     hc = add_hot_cold(played, sk)
@@ -210,12 +342,15 @@ def main():
         zfig = go.Figure()
         zfig.add_scatter(x=hc["game_date"], y=hc["hot_cold_z"], mode="lines+markers",
                           name=f"{stat_label} z-score", line=dict(color="#636EFA"))
+        add_dnp_markers(zfig, dnp_games)
         zfig.add_hline(y=1, line_dash="dash", line_color="orange")
         zfig.add_hline(y=-1, line_dash="dash", line_color="orange")
         zfig.update_layout(height=340, yaxis_title="Z-score (entering-game mean/SD)")
         st.plotly_chart(zfig, width='stretch')
-        st.caption(f"Dashed lines = ±1 SD. First {HOT_COLD_MIN_GAMES} played games of the season show no "
-                   f"z-score yet (not enough prior history) — {n_gated_out} game(s) currently gated out.")
+        st.caption(f"Dashed lines = ±1 SD. Black X = DNP (no z-score for a game that didn't happen — "
+                   f"streaks simply carry forward across it). First {HOT_COLD_MIN_GAMES} played games "
+                   f"of the season show no z-score yet (not enough prior history) — {n_gated_out} "
+                   f"game(s) currently gated out.")
     else:
         st.info(f"Not enough played games yet this season to compute hot/cold markers "
                 f"(needs {HOT_COLD_MIN_GAMES}+ prior played games).")
@@ -223,34 +358,28 @@ def main():
     st.divider()
 
     # ---------------------------------------------------------------
-    # Other rolling stats
-    # ---------------------------------------------------------------
-    st.subheader("Rebounds & Assists Trend")
-    fig2 = go.Figure()
-    fig2.add_scatter(x=played["game_date"], y=played["reb_tot"], name="REB", mode="lines+markers")
-    fig2.add_scatter(x=played["game_date"], y=played["avg_reb_l5_prior"], name="REB L5 avg (entering)",
-                      mode="lines", line=dict(dash="dot"))
-    fig2.add_scatter(x=played["game_date"], y=played["ast"], name="AST", mode="lines+markers")
-    fig2.add_scatter(x=played["game_date"], y=played["avg_ast_l5_prior"], name="AST L5 avg (entering)",
-                      mode="lines", line=dict(dash="dot"))
-    fig2.update_layout(height=360)
-    st.plotly_chart(fig2, width='stretch')
-
-    st.divider()
-
-    # ---------------------------------------------------------------
     # Full game log
     # ---------------------------------------------------------------
     st.subheader("Game Log")
-    log_df = hc[[
-        "game_date", "opponent", "home_away", "result", "started",
+    st.caption("Includes DNP games (all box-score stats blank) so you can see missed games "
+               "relative to games actually played.")
+
+    log_source = season_df.merge(
+        hc[["game_id", "hot_cold_z", "is_hot", "is_cold"]], on="game_id", how="left",
+    )
+    log_df = log_source[[
+        "game_date", "opponent", "home_away", "result", "dnp",
         "minutes", "pts", "reb_tot", "ast", "stl", "blk", "tov", "game_score",
-        "avg_pts_l5_prior", "avg_pts_l14d_prior", "hot_cold_z", "is_hot", "is_cold",
+        "season_avg_pts_prior", "avg_pts_l5_prior", "avg_pts_l14d_prior",
+        "hot_cold_z", "is_hot", "is_cold",
     ]].sort_values("game_date", ascending=False).copy()
     log_df["game_date"] = log_df["game_date"].dt.strftime("%Y-%m-%d")
+    log_df["dnp"] = log_df["dnp"].map({1: "Yes", 0: ""})
+    log_df["season_avg_pts_prior"] = log_df["season_avg_pts_prior"].round(1)
     log_df["hot_cold_z"] = log_df["hot_cold_z"].round(2)
     log_df = log_df.rename(columns={
-        "hot_cold_z": f"{stat_label} z", "is_hot": "Hot", "is_cold": "Cold",
+        "dnp": "DNP", "hot_cold_z": f"{stat_label} z", "is_hot": "Hot", "is_cold": "Cold",
+        "season_avg_pts_prior": "PTS season avg (to date)",
         "avg_pts_l5_prior": "PTS L5 avg", "avg_pts_l14d_prior": "PTS L14d avg",
     })
     st.dataframe(log_df, hide_index=True, width='stretch', height=400)
