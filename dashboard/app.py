@@ -23,6 +23,7 @@ import streamlit as st
 DEFAULT_DB = "../data/wnba.db"
 HOT_COLD_MIN_GAMES = 5  # min prior played games before a hot/cold read is shown
 TEAM_LOGO_URL = "https://cdn.wnba.com/logos/wnba/{team_id}/primary/L/logo.svg"
+CONSISTENCY_MIN_GAMES = 10  # min played games before a player qualifies for the leaderboard
 
 
 def get_db_path() -> str:
@@ -147,6 +148,44 @@ def load_top_performers(db_path: str, team: str, season: int, n: int = 3):
     ).fetchall()
     conn.close()
     return rows
+
+
+@st.cache_data(ttl=300)
+def load_consistency_leaderboard(db_path: str, stat_col: str, season: int,
+                                  min_games: int = CONSISTENCY_MIN_GAMES, n: int = 30) -> pd.DataFrame:
+    """Top n players league-wide this season ranked by lowest Coefficient
+    of Variation (CV = sample SD / mean) for `stat_col` -- CV rather than
+    raw SD so a star's spread is measured relative to their own scoring
+    level, not against everyone else's absolute numbers (otherwise this
+    would just surface bench players who barely play and score near
+    zero every night). min_games filters out small-sample noise; a
+    player who never records the stat at all (avg == 0) is dropped too,
+    since CV is undefined for them (division by zero)."""
+    season = int(season)  # sqlite3 silently fails to match numpy.int64 against an INTEGER column
+    conn = sqlite3.connect(db_path)
+    df = pd.read_sql(
+        f"""SELECT f.player_id, p.player_name, p.main_position, f.team, f.game_date, f.{stat_col} AS stat_val
+            FROM fact_player_game f JOIN dim_player p ON p.player_id = f.player_id
+            WHERE f.season = ? AND f.dnp = 0""",
+        conn, params=(season,),
+    )
+    conn.close()
+    if df.empty:
+        return pd.DataFrame()
+
+    df = df.sort_values("game_date")
+    agg = df.groupby("player_id").agg(
+        player_name=("player_name", "first"),
+        position=("main_position", "first"),
+        team=("team", "last"),  # most recent team this season, handles trades
+        games=("stat_val", "count"),
+        avg=("stat_val", "mean"),
+        sd=("stat_val", "std"),  # sample SD (ddof=1): this season's games are a sample, not the full population
+    ).reset_index(drop=True)
+
+    agg = agg[(agg["games"] >= min_games) & (agg["avg"] > 0)].copy()
+    agg["cv_pct"] = (agg["sd"] / agg["avg"]) * 100
+    return agg.sort_values("cv_pct", ascending=True).head(n).reset_index(drop=True)
 
 
 @st.cache_data(ttl=300)
@@ -616,6 +655,40 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
         st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
 
 
+def render_consistency_leaderboard(db_path, season):
+    """League-wide, not tied to whichever player(s) are selected above --
+    rendered once at the bottom of the page (not per-panel), even in
+    compare mode, since showing it twice would just be a duplicate."""
+    st.subheader("Consistency Leaderboard", anchor="consistency-leaderboard")
+    stat_label = synced_selectbox(
+        st, "Stat", list(MAJOR_STATS.keys()),
+        "consistency_stat_shared", "consistency_stat_inline")
+    stat_col = MAJOR_STATS[stat_label]
+
+    board = load_consistency_leaderboard(db_path, stat_col, season)
+    st.caption(f"Top 30 most consistent players by {stat_label.lower()} this season ({season}) -- "
+               f"lowest Coefficient of Variation (sample SD ÷ mean), "
+               f"among players with {CONSISTENCY_MIN_GAMES}+ games played. Lower CV = tighter, "
+               f"more predictable game-to-game production relative to their own average.")
+
+    if board.empty:
+        st.info(f"Not enough players with {CONSISTENCY_MIN_GAMES}+ played games yet this season "
+                f"to build a leaderboard.")
+        return
+
+    display_df = board.rename(columns={
+        "player_name": "Player", "position": "Position", "team": "Team", "games": "Games",
+        "avg": f"Avg {stat_label}", "sd": "Std Dev", "cv_pct": "CV %",
+    })
+    display_df.insert(0, "Rank", range(1, len(display_df) + 1))
+    st.dataframe(
+        display_df.style.format({
+            f"Avg {stat_label}": "{:.1f}", "Std Dev": "{:.2f}", "CV %": "{:.1f}%",
+        }),
+        hide_index=True, width='stretch', height=600,
+    )
+
+
 def sidebar_player_picker(db_path, teams, suffix, label_suffix=""):
     """One Team/Player/Season block in the sidebar. `suffix` disambiguates
     widget keys between the primary and comparison pickers; `label_suffix`
@@ -680,6 +753,11 @@ def main():
     st.sidebar.divider()
     st.sidebar.markdown("[Game Log](#game-log-p1)")
 
+    st.sidebar.divider()
+    st.sidebar.subheader("Leaderboard")
+    synced_selectbox(st.sidebar, "Consistency Leaderboard", list(MAJOR_STATS.keys()),
+                      "consistency_stat_shared", "consistency_stat_sidebar", anchor="consistency-leaderboard")
+
     if compare and player_id_2 is not None:
         col1, col2 = st.columns(2)
         with col1:
@@ -688,6 +766,9 @@ def main():
             render_player_panel(db_path, player_id_2, season_2, compact=True, panel_key="p2")
     else:
         render_player_panel(db_path, player_id_1, season_1, compact=False, panel_key="p1")
+
+    st.divider()
+    render_consistency_leaderboard(db_path, season_1)
 
 
 if __name__ == "__main__":
