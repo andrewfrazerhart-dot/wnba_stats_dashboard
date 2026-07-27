@@ -693,7 +693,7 @@ def render_consistency_leaderboard(db_path, season):
     """League-wide, not tied to whichever player(s) are selected above --
     rendered once at the bottom of the page (not per-panel), even in
     compare mode, since showing it twice would just be a duplicate."""
-    st.subheader("Consistency Leaderboard", anchor="consistency-leaderboard")
+    st.subheader("Consistency Leaderboard for Safer Bets", anchor="consistency-leaderboard")
     stat_label = synced_selectbox(
         st, "Stat", list(MAJOR_STATS.keys()),
         "consistency_stat_shared", "consistency_stat_inline")
@@ -705,7 +705,8 @@ def render_consistency_leaderboard(db_path, season):
                f"last column. **CV% (Coefficient of Variation)** is the standard deviation "
                f"expressed as a percentage of the mean (SD ÷ mean × 100): it measures spread "
                f"*relative to each player's own average*, so a 25 PPG scorer and a 6 PPG scorer "
-               f"can be compared fairly. Lower CV% = more consistent.")
+               f"can be compared fairly. Lower CV% = more consistent. Click a player's row to "
+               f"jump to their full page above.")
 
     if board.empty:
         st.info(f"Not enough players with {CONSISTENCY_MIN_GAMES}+ played games yet this season "
@@ -719,22 +720,34 @@ def render_consistency_leaderboard(db_path, season):
     display_df = display_df.rename(columns={
         "player_name": "Player", "position": "Position", "team": "Team", "games": "Games",
         "avg_minutes": "Avg Minutes", "played_streak": "Games In A Row (No DNP)",
-        "avg": avg_col, "range": "1 SD Range", "above_low_streak": "Streak Above Low",
+        "avg": avg_col, "range": "1 SD Range", "above_low_streak": "Streak Above Lower Bound",
         "sd": "Std Dev", "cv_pct": "CV %",
     })
     display_df.insert(0, "Rank", range(1, len(display_df) + 1))
     display_df = display_df[[
         "Rank", "Player", "Position", "Team", "Games", "Avg Minutes",
-        "Games In A Row (No DNP)", avg_col, "1 SD Range", "Streak Above Low",
+        "Games In A Row (No DNP)", avg_col, "1 SD Range", "Streak Above Lower Bound",
         "Std Dev", "CV %",
     ]]
-    st.dataframe(
+    event = st.dataframe(
         display_df.style.format({
             "Avg Minutes": "{:.1f}", avg_col: "{:.1f}", "Std Dev": "{:.2f}", "CV %": "{:.1f}%",
-            "Streak Above Low": "{:.0f}",
+            "Streak Above Lower Bound": "{:.0f}",
         }),
         hide_index=True, width='stretch', height=600,
+        on_select="rerun", selection_mode="single-row", key="consistency_leaderboard_table",
     )
+
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        clicked_player = display_df.iloc[selected_rows[0]]["Player"]
+        if st.session_state.get("player_1") != clicked_player:
+            # can't touch team_1/player_1/season_1 here -- those widgets
+            # were already instantiated earlier in this same run. Stash
+            # the request and apply it at the top of main() on the next
+            # rerun, before the sidebar widgets are (re)created.
+            st.session_state["_pending_player_jump"] = {"player": clicked_player, "season": season}
+            st.rerun()
 
 
 def sidebar_player_picker(db_path, teams, suffix, label_suffix=""):
@@ -768,6 +781,16 @@ def main():
     )
     db_path = get_db_path()
     teams = load_teams(db_path)
+
+    # apply a leaderboard row click from the *previous* run now, before the
+    # team_1/player_1/season_1 widgets below are (re)created -- setting
+    # their session_state after they're instantiated raises an exception,
+    # so the click handler just stashes the request and reruns instead
+    pending_jump = st.session_state.pop("_pending_player_jump", None)
+    if pending_jump:
+        st.session_state["team_1"] = "All Teams"
+        st.session_state["player_1"] = pending_jump["player"]
+        st.session_state["season_1"] = pending_jump["season"]
 
     last_updated = load_last_updated(db_path)
     if last_updated:
@@ -803,7 +826,7 @@ def main():
 
     st.sidebar.divider()
     st.sidebar.subheader("Leaderboard")
-    synced_selectbox(st.sidebar, "Consistency Leaderboard", list(MAJOR_STATS.keys()),
+    synced_selectbox(st.sidebar, "Consistency Leaderboard for Safer Bets", list(MAJOR_STATS.keys()),
                       "consistency_stat_shared", "consistency_stat_sidebar", anchor="consistency-leaderboard")
 
     if compare and player_id_2 is not None:
