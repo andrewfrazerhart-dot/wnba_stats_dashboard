@@ -11,9 +11,10 @@ Run:
 (Streamlit needs the extra `--` before script args.)
 """
 
+import os
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -28,6 +29,16 @@ def get_db_path() -> str:
     if "--db" in sys.argv:
         return sys.argv[sys.argv.index("--db") + 1]
     return DEFAULT_DB
+
+
+def load_last_updated(db_path: str):
+    """Uses the database file's own last-modified time as a proxy for
+    "when was ingest.py last run" -- ingest.py is the only thing that
+    writes to it."""
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(db_path))
+    except OSError:
+        return None
 
 
 @st.cache_data(ttl=300)
@@ -189,7 +200,7 @@ def add_dnp_markers(fig, dnp_games: pd.DataFrame, y_value=0):
     )
 
 
-def synced_selectbox(container, label, options, shared_key, widget_key):
+def synced_selectbox(container, label, options, shared_key, widget_key, anchor=None):
     """A selectbox that can be rendered in multiple places at once (e.g.
     the sidebar AND inline in one or two panels) while staying in sync --
     changing any instance updates the others on the next rerun.
@@ -200,7 +211,11 @@ def synced_selectbox(container, label, options, shared_key, widget_key):
     first render. Instead, this pushes the current shared value into
     this instance's own key right before creating it, every rerun --
     that's what makes every instance track the shared value, not just
-    whichever one the user directly touched."""
+    whichever one the user directly touched.
+
+    `anchor`, if given, renders the label as a clickable in-page link to
+    that chart's heading instead of a plain (non-clickable) widget label --
+    used for the sidebar copies so clicking the section name jumps to it."""
     if shared_key not in st.session_state:
         st.session_state[shared_key] = options[0]
     st.session_state[widget_key] = st.session_state[shared_key]
@@ -208,6 +223,10 @@ def synced_selectbox(container, label, options, shared_key, widget_key):
     def _sync():
         st.session_state[shared_key] = st.session_state[widget_key]
 
+    if anchor:
+        container.markdown(f"[{label}](#{anchor})")
+        return container.selectbox(label, options, key=widget_key, on_change=_sync,
+                                    label_visibility="collapsed")
     return container.selectbox(label, options, key=widget_key, on_change=_sync)
 
 
@@ -337,10 +356,8 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     age = compute_age(birthdate)
     height_str = format_height(height_in)
 
-    logo_col, title_col = st.columns([1, 8])
+    title_col, logo_col = st.columns([8, 1])
     logo_url = team_logo_url(load_team_id(db_path, player_team))
-    if logo_url:
-        logo_col.image(logo_url, width=72)
     with title_col:
         st.title(bio.player_name)
         caption_parts = [player_team, f"{bio.position_detail} ({bio.main_position})"]
@@ -350,6 +367,8 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
             caption_parts.append(height_str)
         caption_parts.append(f"{season} season")
         st.caption(" · ".join(caption_parts))
+    if logo_url:
+        logo_col.image(logo_url, width=72)
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Season Avg PTS", f"{played.pts.mean():.1f}")
@@ -378,10 +397,10 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     if next_game:
         opp = next_game["opponent"]
         opp_logo_url = team_logo_url(load_team_id(db_path, opp))
-        ng_logo, ng1, ng2, ng3, ng4, ng5 = st.columns([1, 2, 2, 2, 2, 2])
+        ng1, ng_logo, ng2, ng3, ng4, ng5 = st.columns([2, 1, 2, 2, 2, 2])
+        ng1.metric("Opponent", f"{opp} ({next_game['home_away']})")
         if opp_logo_url:
             ng_logo.image(opp_logo_url, width=48)
-        ng1.metric("Opponent", f"{opp} ({next_game['home_away']})")
         ng2.metric(f"{opp} Record",
                    f"{next_game['opp_wins']}-{next_game['opp_losses']}"
                    if next_game["opp_wins"] is not None else "N/A")
@@ -391,7 +410,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
                    f"{next_game['opp_ppg_against']:.1f}" if next_game["opp_ppg_against"] is not None else "N/A")
         ng5.metric(f"{player_team} PPG",
                    f"{next_game['team_ppg_for']:.1f}" if next_game["team_ppg_for"] is not None else "N/A")
-        st.caption(f"{next_game['game_date']}")
+        st.caption(f"Game date: {next_game['game_date']}")
     else:
         st.caption("No upcoming games scheduled (run ingest.py to refresh the schedule, "
                    "or the season may be over).")
@@ -401,7 +420,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Threshold hit-rates
     # ---------------------------------------------------------------
-    st.subheader("Threshold Hit-Rates")
+    st.subheader("Threshold Hit-Rates", anchor=f"threshold-hit-rates-{panel_key}")
     threshold_stat_label = synced_selectbox(
         st, "Stat", list(THRESHOLD_STAT_OPTIONS.keys()),
         "threshold_stat_shared", f"threshold_stat_inline_{panel_key}")
@@ -428,7 +447,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Stat trend (single stat, selectable)
     # ---------------------------------------------------------------
-    st.subheader("Stat Trend")
+    st.subheader("Stat Trend", anchor=f"stat-trend-{panel_key}")
     trend_stat_label = synced_selectbox(
         st, "Stat", list(MAJOR_STATS.keys()),
         "trend_stat_shared", f"trend_stat_inline_{panel_key}")
@@ -455,7 +474,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Rolling hot / cold trend
     # ---------------------------------------------------------------
-    st.subheader("Rolling Hot / Cold Trend")
+    st.subheader("Rolling Hot / Cold Trend", anchor=f"rolling-hot-cold-trend-{panel_key}")
     hotcoldtrend_stat_label = synced_selectbox(
         st, "Stat", list(MAJOR_STATS.keys()),
         "hotcoldtrend_stat_shared", f"hotcoldtrend_stat_inline_{panel_key}")
@@ -487,7 +506,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Hot / Cold markers (z-score vs. entering-game mean/SD)
     # ---------------------------------------------------------------
-    st.subheader("Hot / Cold Markers")
+    st.subheader("Hot / Cold Markers", anchor=f"hot-cold-markers-{panel_key}")
     st.caption("Games flagged ≥1 SD above/below the player's own to-date mean, entering that game "
                "(leakage-safe) — plus the current streak of consecutive hot/cold games.")
 
@@ -549,10 +568,13 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     })
 
     if compact:
+        # expanders don't support an anchor -- a bare id div gives the
+        # sidebar "Game Log" link something to jump to even in compare mode
+        st.markdown(f'<div id="game-log-{panel_key}"></div>', unsafe_allow_html=True)
         with st.expander("Game Log", key=f"gamelog_expander_{panel_key}"):
             st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
     else:
-        st.subheader("Game Log")
+        st.subheader("Game Log", anchor=f"game-log-{panel_key}")
         st.caption("Includes DNP games (all box-score stats blank) so you can see missed games "
                    "relative to games actually played.")
         st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
@@ -586,6 +608,10 @@ def main():
     db_path = get_db_path()
     teams = load_teams(db_path)
 
+    last_updated = load_last_updated(db_path)
+    if last_updated:
+        st.sidebar.caption(f"Updated: {last_updated:%Y-%m-%d %H:%M}")
+
     st.sidebar.title("Player Selection")
     player_id_1, season_1 = sidebar_player_picker(db_path, teams, "1")
     if player_id_1 is None:
@@ -600,15 +626,19 @@ def main():
 
     st.sidebar.divider()
     st.sidebar.subheader("Chart Settings")
-    st.sidebar.caption("Also editable inline, right above each chart -- both stay in sync.")
-    synced_selectbox(st.sidebar, "Threshold Hit-Rates stat", list(THRESHOLD_STAT_OPTIONS.keys()),
-                      "threshold_stat_shared", "threshold_stat_sidebar")
-    synced_selectbox(st.sidebar, "Stat Trend stat", list(MAJOR_STATS.keys()),
-                      "trend_stat_shared", "trend_stat_sidebar")
-    synced_selectbox(st.sidebar, "Rolling Hot/Cold Trend stat", list(MAJOR_STATS.keys()),
-                      "hotcoldtrend_stat_shared", "hotcoldtrend_stat_sidebar")
-    synced_selectbox(st.sidebar, "Hot/Cold Markers stat", list(HOTCOLD_STAT_OPTIONS.keys()),
-                      "hotcold_stat_shared", "hotcold_stat_sidebar")
+    st.sidebar.caption("Click a name to jump there. Also editable inline, right above each "
+                        "chart -- both stay in sync.")
+    synced_selectbox(st.sidebar, "Threshold Hit-Rates", list(THRESHOLD_STAT_OPTIONS.keys()),
+                      "threshold_stat_shared", "threshold_stat_sidebar", anchor="threshold-hit-rates-p1")
+    synced_selectbox(st.sidebar, "Stat Trend", list(MAJOR_STATS.keys()),
+                      "trend_stat_shared", "trend_stat_sidebar", anchor="stat-trend-p1")
+    synced_selectbox(st.sidebar, "Rolling Hot / Cold Trend", list(MAJOR_STATS.keys()),
+                      "hotcoldtrend_stat_shared", "hotcoldtrend_stat_sidebar", anchor="rolling-hot-cold-trend-p1")
+    synced_selectbox(st.sidebar, "Hot / Cold Markers", list(HOTCOLD_STAT_OPTIONS.keys()),
+                      "hotcold_stat_shared", "hotcold_stat_sidebar", anchor="hot-cold-markers-p1")
+
+    st.sidebar.divider()
+    st.sidebar.markdown("[Game Log](#game-log-p1)")
 
     if compare and player_id_2 is not None:
         col1, col2 = st.columns(2)
