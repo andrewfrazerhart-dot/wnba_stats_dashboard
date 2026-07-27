@@ -104,6 +104,18 @@ def add_dnp_markers(fig, dnp_games: pd.DataFrame, y_value=0):
 MAJOR_STATS = {"Points": "pts", "Rebounds": "reb_tot", "Assists": "ast",
                "Steals": "stl", "Blocks": "blk", "Turnovers": "tov"}
 
+THRESHOLD_STAT_OPTIONS = {
+    "Points": ("pts", (5, 10, 15, 20, 25, 30), "pts"),
+    "Rebounds": ("reb_tot", (2, 4, 6, 8, 10), "reb"),
+    "Assists": ("ast", (2, 4, 6, 8), "ast"),
+    "Steals": ("stl", (1, 2, 3), "stl"),
+    "Blocks": ("blk", (1, 2, 3), "blk"),
+    "Turnovers": ("tov", (1, 2, 3, 4), "tov"),
+}
+
+HOTCOLD_STAT_OPTIONS = {"Points": "pts", "Rebounds": "reb_tot", "Assists": "ast",
+                         "Steals": "stl", "Blocks": "blk", "Game Score": "game_score"}
+
 
 def rolling_prior_averages(season_df: pd.DataFrame, stat_col: str) -> pd.DataFrame:
     """Leakage-safe L5/L14D averages entering each game (played or DNP),
@@ -142,16 +154,6 @@ def streak(flags: pd.Series) -> int:
     return count
 
 
-THRESHOLD_STAT_OPTIONS = {
-    "Points": ("pts", (5, 10, 15, 20, 25, 30), "pts"),
-    "Rebounds": ("reb_tot", (2, 4, 6, 8, 10), "reb"),
-    "Assists": ("ast", (2, 4, 6, 8), "ast"),
-    "Steals": ("stl", (1, 2, 3), "stl"),
-    "Blocks": ("blk", (1, 2, 3), "blk"),
-    "Turnovers": ("tov", (1, 2, 3, 4), "tov"),
-}
-
-
 def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) -> pd.DataFrame:
     """Hit-rate for each threshold, split several ways: overall, home/away,
     and recent form (last 5 played games, last 14 calendar days) -- the
@@ -180,28 +182,17 @@ def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) 
     return pd.DataFrame(rows)
 
 
-def main():
-    st.set_page_config(page_title="WNBA Player Stats Dashboard", layout="wide")
-    db_path = get_db_path()
-
-    st.sidebar.title("Player Selection")
-
-    teams = load_teams(db_path)
-    team_choice = st.sidebar.selectbox("Team", ["All Teams"] + teams)
-    selected_team = None if team_choice == "All Teams" else team_choice
-
-    players = load_player_list(db_path, team=selected_team)
-    if players.empty:
-        st.error(f"No players found in {db_path}. Run seed_mock_data.py first.")
-        return
-
-    player_name = st.sidebar.selectbox("Player", players["player_name"])
-    player_id = int(players.loc[players.player_name == player_name, "player_id"].iloc[0])
-
+def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_stat_label,
+                         hotcoldtrend_stat_label, hotcold_stat_label, compact=False, panel_key="p1"):
+    """Renders one player's full panel: header, all charts, game log.
+    `compact=True` (used in compare mode, where two of these sit side by
+    side) tucks the game log behind a collapsed expander so two full game
+    logs don't turn the page into a wall of scrolling. `panel_key` gives
+    every widget a unique key -- needed because compare mode can show the
+    same player/season on both sides (e.g. comparing two seasons of the
+    same player isn't actually asked for here, but nothing should break
+    if two panels happen to render identical content)."""
     df = load_player_games(db_path, player_id)
-    seasons = sorted(df["season"].unique(), reverse=True)
-    season = st.sidebar.selectbox("Season", seasons)
-
     season_df = df[df.season == season].reset_index(drop=True)
     played = season_df[season_df.dnp == 0].copy()
     dnp_games = season_df[season_df.dnp == 1].copy()
@@ -218,10 +209,11 @@ def main():
     st.title(bio.player_name)
     st.caption(f"{played.iloc[-1].team} · {bio.position_detail} ({bio.main_position}) · {season} season")
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Season Avg PTS", f"{played.pts.mean():.1f}")
     m2.metric("Season Avg REB", f"{played.reb_tot.mean():.1f}")
     m3.metric("Season Avg AST", f"{played.ast.mean():.1f}")
+    m4, m5, m6 = st.columns(3)
     m4.metric("Games Played", f"{len(played)}")
     m5.metric("Games Missed (DNP)", f"{(season_df.dnp == 1).sum()}")
     last5_pts = played.tail(5)["pts"].mean()
@@ -234,10 +226,6 @@ def main():
     # Threshold hit-rates
     # ---------------------------------------------------------------
     st.subheader("Threshold Hit-Rates")
-    st.caption("% of played games clearing each threshold -- overall, home/away, and recent form "
-               "(last 5 games, last 14 days) -- same L5/L14D windows used in the rolling and streak charts below.")
-
-    threshold_stat_label = st.selectbox("Stat", list(THRESHOLD_STAT_OPTIONS.keys()), key="threshold_stat")
     threshold_col, thresholds, threshold_short_label = THRESHOLD_STAT_OPTIONS[threshold_stat_label]
 
     hr = hit_rate_table(played, threshold_col, thresholds, threshold_short_label)
@@ -249,21 +237,19 @@ def main():
     fig.add_bar(name="Last 14 Days", x=hr["Threshold"], y=hr["Last 14 Days"], marker_color="red")
     fig.update_layout(barmode="group", yaxis_title="Hit rate (%)", yaxis_range=[0, 100], height=420,
                        legend=dict(orientation="h", y=1.15))
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, width='stretch', key=f"threshold_chart_{panel_key}")
 
     st.dataframe(
         hr.style.format({c: "{:.0f}%" for c in ["Overall", "Home", "Away", "Last 5", "Last 14 Days"]}),
-        hide_index=True, width='stretch',
+        hide_index=True, width='stretch', key=f"threshold_table_{panel_key}",
     )
 
     st.divider()
 
     # ---------------------------------------------------------------
-    # Stat trend (single stat, selectable) -- moved up per request, right
-    # below Threshold Hit-Rates
+    # Stat trend (single stat, selectable)
     # ---------------------------------------------------------------
     st.subheader("Stat Trend")
-    trend_stat_label = st.selectbox("Stat", list(MAJOR_STATS.keys()), key="trend_stat")
     trend_stat_col = MAJOR_STATS[trend_stat_label]
 
     rolling_df = rolling_prior_averages(season_df, trend_stat_col)
@@ -278,7 +264,7 @@ def main():
                            name="L14D avg (entering)", mode="lines", line=dict(dash="dot", color="red"))
     add_dnp_markers(fig_trend, dnp_games)
     fig_trend.update_layout(height=380, yaxis_title=trend_stat_label, legend=dict(orientation="h", y=1.15))
-    st.plotly_chart(fig_trend, width='stretch')
+    st.plotly_chart(fig_trend, width='stretch', key=f"trend_chart_{panel_key}")
     st.caption("Black X = DNP. Rolling lines are leakage-safe (entering each game) and continue "
                "across DNP gaps, since a missed game doesn't change the average.")
 
@@ -288,7 +274,6 @@ def main():
     # Rolling hot / cold trend
     # ---------------------------------------------------------------
     st.subheader("Rolling Hot / Cold Trend")
-    hotcoldtrend_stat_label = st.selectbox("Stat", list(MAJOR_STATS.keys()), key="hotcoldtrend_stat")
     hotcoldtrend_stat_col = MAJOR_STATS[hotcoldtrend_stat_label]
     st.caption(f"{hotcoldtrend_stat_label} per game vs. rolling 5-game and trailing 14-day averages "
                f"(entering each game, leakage-safe)")
@@ -307,7 +292,7 @@ def main():
     trend.add_hline(y=played[hotcoldtrend_stat_col].mean(), line_dash="dash", line_color="gray",
                      annotation_text="Season avg (final)")
     trend.update_layout(height=420, yaxis_title=hotcoldtrend_stat_label, legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(trend, width='stretch')
+    st.plotly_chart(trend, width='stretch', key=f"hotcoldtrend_chart_{panel_key}")
     st.caption("Green bar = home game, blue bar = away game. Black X = DNP. Rolling lines reflect "
                "games *entering* each date (leakage-safe) and continue across DNP gaps, since a "
                "missed game doesn't change the average.")
@@ -321,12 +306,8 @@ def main():
     st.caption("Games flagged ≥1 SD above/below the player's own to-date mean, entering that game "
                "(leakage-safe) — plus the current streak of consecutive hot/cold games.")
 
-    stat_options = {"Points": "pts", "Rebounds": "reb_tot", "Assists": "ast",
-                     "Steals": "stl", "Blocks": "blk", "Game Score": "game_score"}
-    stat_label = st.selectbox("Stat", list(stat_options.keys()), key="hotcold_stat")
-    sk = stat_options[stat_label]
-
-    hc = add_hot_cold(played, sk)
+    hotcold_stat_col = HOTCOLD_STAT_OPTIONS[hotcold_stat_label]
+    hc = add_hot_cold(played, hotcold_stat_col)
     valid = hc[hc["hot_cold_z"].notna()]
     n_gated_out = len(hc) - len(valid)
 
@@ -341,12 +322,12 @@ def main():
 
         zfig = go.Figure()
         zfig.add_scatter(x=hc["game_date"], y=hc["hot_cold_z"], mode="lines+markers",
-                          name=f"{stat_label} z-score", line=dict(color="#636EFA"))
+                          name=f"{hotcold_stat_label} z-score", line=dict(color="#636EFA"))
         add_dnp_markers(zfig, dnp_games)
         zfig.add_hline(y=1, line_dash="dash", line_color="orange")
         zfig.add_hline(y=-1, line_dash="dash", line_color="orange")
         zfig.update_layout(height=340, yaxis_title="Z-score (entering-game mean/SD)")
-        st.plotly_chart(zfig, width='stretch')
+        st.plotly_chart(zfig, width='stretch', key=f"hotcold_zfig_{panel_key}")
         st.caption(f"Dashed lines = ±1 SD. Black X = DNP (no z-score for a game that didn't happen — "
                    f"streaks simply carry forward across it). First {HOT_COLD_MIN_GAMES} played games "
                    f"of the season show no z-score yet (not enough prior history) — {n_gated_out} "
@@ -360,10 +341,6 @@ def main():
     # ---------------------------------------------------------------
     # Full game log
     # ---------------------------------------------------------------
-    st.subheader("Game Log")
-    st.caption("Includes DNP games (all box-score stats blank) so you can see missed games "
-               "relative to games actually played.")
-
     log_source = season_df.merge(
         hc[["game_id", "hot_cold_z", "is_hot", "is_cold"]], on="game_id", how="left",
     )
@@ -378,11 +355,83 @@ def main():
     log_df["season_avg_pts_prior"] = log_df["season_avg_pts_prior"].round(1)
     log_df["hot_cold_z"] = log_df["hot_cold_z"].round(2)
     log_df = log_df.rename(columns={
-        "dnp": "DNP", "hot_cold_z": f"{stat_label} z", "is_hot": "Hot", "is_cold": "Cold",
+        "dnp": "DNP", "hot_cold_z": f"{hotcold_stat_label} z", "is_hot": "Hot", "is_cold": "Cold",
         "season_avg_pts_prior": "PTS season avg (to date)",
         "avg_pts_l5_prior": "PTS L5 avg", "avg_pts_l14d_prior": "PTS L14d avg",
     })
-    st.dataframe(log_df, hide_index=True, width='stretch', height=400)
+
+    if compact:
+        with st.expander("Game Log", key=f"gamelog_expander_{panel_key}"):
+            st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
+    else:
+        st.subheader("Game Log")
+        st.caption("Includes DNP games (all box-score stats blank) so you can see missed games "
+                   "relative to games actually played.")
+        st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
+
+
+def sidebar_player_picker(db_path, teams, suffix, label_suffix=""):
+    """One Team/Player/Season block in the sidebar. `suffix` disambiguates
+    widget keys between the primary and comparison pickers; `label_suffix`
+    is just a visual hint (e.g. " (P2)") so the two blocks aren't identical
+    text when both are visible."""
+    team_choice = st.sidebar.selectbox(f"Team{label_suffix}", ["All Teams"] + teams, key=f"team_{suffix}")
+    selected_team = None if team_choice == "All Teams" else team_choice
+
+    players = load_player_list(db_path, team=selected_team)
+    if players.empty:
+        st.sidebar.error("No players found for that team.")
+        return None, None
+
+    player_name = st.sidebar.selectbox(f"Player{label_suffix}", players["player_name"], key=f"player_{suffix}")
+    player_id = int(players.loc[players.player_name == player_name, "player_id"].iloc[0])
+
+    df = load_player_games(db_path, player_id)
+    seasons = sorted(df["season"].unique(), reverse=True)
+    season = st.sidebar.selectbox(f"Season{label_suffix}", seasons, key=f"season_{suffix}")
+
+    return player_id, season
+
+
+def main():
+    st.set_page_config(page_title="WNBA Player Stats Dashboard", layout="wide")
+    db_path = get_db_path()
+    teams = load_teams(db_path)
+
+    st.sidebar.title("Player Selection")
+    player_id_1, season_1 = sidebar_player_picker(db_path, teams, "1")
+    if player_id_1 is None:
+        st.error(f"No players found in {db_path}. Run seed_mock_data.py first.")
+        return
+
+    compare = st.sidebar.checkbox("Compare with another player")
+    player_id_2 = season_2 = None
+    if compare:
+        st.sidebar.markdown("**Player 2**")
+        player_id_2, season_2 = sidebar_player_picker(db_path, teams, "2", " (P2)")
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Chart Settings")
+    threshold_stat_label = st.sidebar.selectbox(
+        "Threshold Hit-Rates stat", list(THRESHOLD_STAT_OPTIONS.keys()), key="threshold_stat")
+    trend_stat_label = st.sidebar.selectbox(
+        "Stat Trend stat", list(MAJOR_STATS.keys()), key="trend_stat")
+    hotcoldtrend_stat_label = st.sidebar.selectbox(
+        "Rolling Hot/Cold Trend stat", list(MAJOR_STATS.keys()), key="hotcoldtrend_stat")
+    hotcold_stat_label = st.sidebar.selectbox(
+        "Hot/Cold Markers stat", list(HOTCOLD_STAT_OPTIONS.keys()), key="hotcold_stat")
+
+    if compare and player_id_2 is not None:
+        col1, col2 = st.columns(2)
+        with col1:
+            render_player_panel(db_path, player_id_1, season_1, threshold_stat_label, trend_stat_label,
+                                 hotcoldtrend_stat_label, hotcold_stat_label, compact=True, panel_key="p1")
+        with col2:
+            render_player_panel(db_path, player_id_2, season_2, threshold_stat_label, trend_stat_label,
+                                 hotcoldtrend_stat_label, hotcold_stat_label, compact=True, panel_key="p2")
+    else:
+        render_player_panel(db_path, player_id_1, season_1, threshold_stat_label, trend_stat_label,
+                             hotcoldtrend_stat_label, hotcold_stat_label, compact=False, panel_key="p1")
 
 
 if __name__ == "__main__":
