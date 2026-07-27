@@ -192,12 +192,33 @@ def build_player_season_rows(player_id, season, gamelog, team_id, schedule_by_te
     return all_rows
 
 
+TEAM_SCHEDULE_DDL = """
+CREATE TABLE IF NOT EXISTS team_schedule (
+    season          INTEGER NOT NULL,
+    game_id         TEXT NOT NULL,
+    game_date       TEXT NOT NULL,
+    team            TEXT NOT NULL,
+    opponent        TEXT NOT NULL,
+    home_away       TEXT NOT NULL CHECK (home_away IN ('H', 'A')),
+    status          TEXT NOT NULL CHECK (status IN ('Scheduled', 'Final')),
+    team_score      INTEGER,
+    opp_score       INTEGER,
+    team_wins       INTEGER,
+    team_losses     INTEGER,
+    PRIMARY KEY (season, team, game_id)
+);
+CREATE INDEX IF NOT EXISTS idx_team_schedule_team_season ON team_schedule(team, season);
+"""
+
+
 def build_schema(db_path, full_refresh=False):
     """full_refresh=True wipes any existing database (e.g. to clear out
     old mock data or start completely clean). Otherwise an existing
     database is reused as-is -- that's what makes incremental updates
     possible -- and a schema is only created if the file doesn't exist
-    yet."""
+    yet. TEAM_SCHEDULE_DDL runs unconditionally (CREATE ... IF NOT EXISTS)
+    as a lightweight migration, so databases created before team_schedule
+    existed pick it up without needing a full wipe-and-rebuild."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if full_refresh and db_path.exists():
         db_path.unlink()
@@ -207,7 +228,54 @@ def build_schema(db_path, full_refresh=False):
         with open(SCHEMA_PATH) as f:
             conn.executescript(f.read())
         conn.commit()
+    conn.executescript(TEAM_SCHEDULE_DDL)
+    conn.commit()
     return conn
+
+
+def build_team_schedule_rows(game_dates, season):
+    """Flattens the schedule feed into two rows per game (one per team's
+    perspective). Regular Season only, matching SEASON_TYPE used
+    elsewhere (playoffs/preseason deferred, see README limitations)."""
+    rows = []
+    for gd in game_dates:
+        for g in gd["games"]:
+            if g["seasonType"] != SEASON_TYPE:
+                continue
+            status = "Final" if g["gameStatus"] == 3 else "Scheduled"
+            game_date = g["gameDateEst"][:10]
+            home, away = g["homeTeam"], g["awayTeam"]
+            home_score = home["score"] if status == "Final" else None
+            away_score = away["score"] if status == "Final" else None
+            rows.append(dict(
+                season=season, game_id=g["gameId"], game_date=game_date,
+                team=home["teamTricode"], opponent=away["teamTricode"], home_away="H",
+                status=status, team_score=home_score, opp_score=away_score,
+                team_wins=home["wins"], team_losses=home["losses"],
+            ))
+            rows.append(dict(
+                season=season, game_id=g["gameId"], game_date=game_date,
+                team=away["teamTricode"], opponent=home["teamTricode"], home_away="A",
+                status=status, team_score=away_score, opp_score=home_score,
+                team_wins=away["wins"], team_losses=away["losses"],
+            ))
+    return rows
+
+
+def insert_team_schedule(conn, season, rows):
+    """Always deletes + reinserts for this season -- cheap (one API call,
+    a few hundred rows) and simplest way to pick up newly-final games and
+    updated records each run, current-season only."""
+    conn.execute("DELETE FROM team_schedule WHERE season = ?", (season,))
+    if rows:
+        cols = ["season", "game_id", "game_date", "team", "opponent", "home_away",
+                "status", "team_score", "opp_score", "team_wins", "team_losses"]
+        placeholders = ", ".join(["?"] * len(cols))
+        conn.executemany(
+            f"INSERT INTO team_schedule ({', '.join(cols)}) VALUES ({placeholders})",
+            [tuple(r[c] for c in cols) for r in rows],
+        )
+    conn.commit()
 
 
 def insert_players(conn, players_by_id):
@@ -308,6 +376,13 @@ def main():
         new_player_ids = {p["PERSON_ID"] for p in roster if p["PERSON_ID"] not in existing_player_ids}
         print(f"  {len(roster)} active players found ({len(new_player_ids)} not yet tracked).")
 
+        print(f"Fetching full league schedule for {current_season}...")
+        game_dates = client.get_schedule(current_season)
+        schedule_rows = build_team_schedule_rows(game_dates, current_season)
+        n_final = sum(1 for r in schedule_rows if r["status"] == "Final") // 2
+        n_scheduled = sum(1 for r in schedule_rows if r["status"] == "Scheduled") // 2
+        print(f"  {n_final} completed games, {n_scheduled} upcoming games.")
+
         players_by_id = {}
         for p in roster:
             if p["PERSON_ID"] not in new_player_ids:
@@ -376,6 +451,7 @@ def main():
           f"(existing rows are skipped automatically)...")
     insert_players(conn, players_by_id)
     insert_games(conn, all_fact_rows)
+    insert_team_schedule(conn, current_season, schedule_rows)
 
     print(f"Recomputing features for season(s): {sorted(touched_seasons)}...")
     n_features = recompute_features_for_seasons(conn, sorted(touched_seasons))
@@ -383,10 +459,12 @@ def main():
     n_players_total = conn.execute("SELECT COUNT(*) FROM dim_player").fetchone()[0]
     n_games_total = conn.execute("SELECT COUNT(*) FROM fact_player_game").fetchone()[0]
     n_dnp_total = conn.execute("SELECT COUNT(*) FROM fact_player_game WHERE dnp = 1").fetchone()[0]
+    n_schedule_total = conn.execute("SELECT COUNT(*) FROM team_schedule").fetchone()[0]
     print(f"\nDone. Database at: {db_path}")
     print(f"  players (total in db):     {n_players_total}")
     print(f"  player-game rows (total):  {n_games_total}  ({n_dnp_total} DNP)")
     print(f"  feature rows recomputed:   {n_features}")
+    print(f"  team_schedule rows:        {n_schedule_total}")
 
     conn.close()
 

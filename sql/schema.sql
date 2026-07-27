@@ -196,3 +196,28 @@ JOIN dim_player p ON p.player_id = f.player_id
 JOIN player_game_features ft
     ON ft.player_id = f.player_id AND ft.season = f.season AND ft.game_id = f.game_id
 WHERE f.dnp = 0;
+
+-- ============================================================
+-- team_schedule: one row per (team, game) -- so a single real game
+-- produces two rows, one per team's perspective. Covers both played
+-- and not-yet-played games (unlike fact_player_game, which only ever
+-- has played/DNP rows for games that have already happened) -- this is
+-- the only place upcoming opponents come from. team_wins/team_losses
+-- are that team's record as of this game, straight from the source.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS team_schedule (
+    season          INTEGER NOT NULL,
+    game_id         TEXT NOT NULL,
+    game_date       TEXT NOT NULL,
+    team            TEXT NOT NULL,
+    opponent        TEXT NOT NULL,
+    home_away       TEXT NOT NULL CHECK (home_away IN ('H', 'A')),
+    status          TEXT NOT NULL CHECK (status IN ('Scheduled', 'Final')),
+    team_score      INTEGER,
+    opp_score       INTEGER,
+    team_wins       INTEGER,
+    team_losses     INTEGER,
+    PRIMARY KEY (season, team, game_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_schedule_team_season ON team_schedule(team, season);

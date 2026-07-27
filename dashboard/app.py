@@ -68,6 +68,53 @@ def load_player_games(db_path: str, player_id: int) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=300)
+def load_next_game_info(db_path: str, team: str, season: int):
+    """Next not-yet-played game for `team`, plus context for the display
+    line: opponent's record entering that game, opponent's season PPG
+    for/against, and this team's own season PPG. Returns None if there's
+    no upcoming game left in team_schedule for this season (e.g. season
+    over, or team_schedule not yet populated by a run of ingest.py)."""
+    season = int(season)  # sqlite3 silently fails to match numpy.int64 against an INTEGER column
+    conn = sqlite3.connect(db_path)
+
+    next_game = conn.execute(
+        """SELECT game_date, opponent, home_away FROM team_schedule
+           WHERE team = ? AND season = ? AND status = 'Scheduled'
+           ORDER BY game_date ASC LIMIT 1""",
+        (team, season),
+    ).fetchone()
+    if next_game is None:
+        conn.close()
+        return None
+    game_date, opponent, home_away = next_game
+
+    opp_record = conn.execute(
+        """SELECT team_wins, team_losses FROM team_schedule
+           WHERE team = ? AND season = ? AND game_date = ? AND opponent = ?""",
+        (opponent, season, game_date, team),
+    ).fetchone()
+    opp_ppg_for, opp_ppg_against = conn.execute(
+        """SELECT AVG(team_score), AVG(opp_score) FROM team_schedule
+           WHERE team = ? AND season = ? AND status = 'Final'""",
+        (opponent, season),
+    ).fetchone()
+    (team_ppg_for,) = conn.execute(
+        """SELECT AVG(team_score) FROM team_schedule
+           WHERE team = ? AND season = ? AND status = 'Final'""",
+        (team, season),
+    ).fetchone()
+
+    conn.close()
+    return dict(
+        game_date=game_date, opponent=opponent, home_away=home_away,
+        opp_wins=opp_record[0] if opp_record else None,
+        opp_losses=opp_record[1] if opp_record else None,
+        opp_ppg_for=opp_ppg_for, opp_ppg_against=opp_ppg_against,
+        team_ppg_for=team_ppg_for,
+    )
+
+
 def add_hot_cold(played: pd.DataFrame, stat: str) -> pd.DataFrame:
     """Leakage-safe z-score vs. each game's entering (prior-games) mean/SD,
     computed here in the app since the schema only stores prior *averages*,
@@ -265,6 +312,27 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     m6.metric("Games Played", f"{len(played)}")
     m7.metric("Games Missed (DNP)", f"{(season_df.dnp == 1).sum()}")
     m8.metric("Current Played Streak", f"{played_streak(season_df)} game(s)")
+
+    player_team = played.iloc[-1].team
+    next_game = load_next_game_info(db_path, player_team, season)
+    st.markdown("**Next Game**")
+    if next_game:
+        opp = next_game["opponent"]
+        ng1, ng2, ng3, ng4, ng5 = st.columns(5)
+        ng1.metric("Opponent", f"{opp} ({next_game['home_away']})")
+        ng2.metric(f"{opp} Record",
+                   f"{next_game['opp_wins']}-{next_game['opp_losses']}"
+                   if next_game["opp_wins"] is not None else "N/A")
+        ng3.metric(f"{opp} PPG",
+                   f"{next_game['opp_ppg_for']:.1f}" if next_game["opp_ppg_for"] is not None else "N/A")
+        ng4.metric(f"{opp} PPG Allowed",
+                   f"{next_game['opp_ppg_against']:.1f}" if next_game["opp_ppg_against"] is not None else "N/A")
+        ng5.metric(f"{player_team} PPG",
+                   f"{next_game['team_ppg_for']:.1f}" if next_game["team_ppg_for"] is not None else "N/A")
+        st.caption(f"{next_game['game_date']}")
+    else:
+        st.caption("No upcoming games scheduled (run ingest.py to refresh the schedule, "
+                   "or the season may be over).")
 
     st.divider()
 

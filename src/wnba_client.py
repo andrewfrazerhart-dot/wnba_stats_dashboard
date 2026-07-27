@@ -87,10 +87,7 @@ class WNBAClient:
         if self._playwright:
             self._playwright.stop()
 
-    def _get(self, endpoint, params, result_set_name=None):
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        url = f"{BASE}/{endpoint}?{query}"
-
+    def _fetch_json(self, url, error_label):
         last_error = None
         for attempt in range(1, RETRIES + 1):
             result = self._page.evaluate(
@@ -101,12 +98,17 @@ class WNBAClient:
             )
             if result["ok"]:
                 time.sleep(CALL_DELAY_S)
-                payload = json.loads(result["text"])
-                return _result_set_to_dicts(payload, result_set_name)
+                return json.loads(result["text"])
             last_error = f"HTTP {result['status']}: {result['text'][:200]}"
             time.sleep(RETRY_DELAY_S * attempt)
 
-        raise RuntimeError(f"{endpoint} failed after {RETRIES} attempts: {last_error}")
+        raise RuntimeError(f"{error_label} failed after {RETRIES} attempts: {last_error}")
+
+    def _get(self, endpoint, params, result_set_name=None):
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{BASE}/{endpoint}?{query}"
+        payload = self._fetch_json(url, endpoint)
+        return _result_set_to_dicts(payload, result_set_name)
 
     def get_active_players(self, season):
         """Full active-roster index for a season: PERSON_ID, name, TEAM_ID, etc.
@@ -147,3 +149,15 @@ class WNBAClient:
             "TeamID": team_id, "Season": season, "SeasonType": season_type_q,
             "LeagueID": LEAGUE_ID,
         })
+
+    def get_schedule(self, season):
+        """Full-season schedule for every team, played AND upcoming, in a
+        single call -- this is wnba.com's own first-party schedule API
+        (not stats.wnba.com/stats), the only source here for not-yet-played
+        games. Each game already carries both teams' win-loss record as of
+        that game, and the final score once played, so this alone covers
+        next-game lookups, records, and PPG-for/against without needing
+        any additional per-team calls."""
+        url = f"https://www.wnba.com/api/schedule?season={season}&regionId=1"
+        payload = self._fetch_json(url, "schedule")
+        return payload["leagueSchedule"]["gameDates"]
