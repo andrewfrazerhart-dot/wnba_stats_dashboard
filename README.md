@@ -7,10 +7,10 @@ features precomputed, plus a Streamlit dashboard on top.
 ## Project structure
 
 - `sql/schema.sql` — the schema: `dim_player`, `fact_player_game`,
-  `player_game_features`, and two consumption views (`v_dashboard`,
-  `v_ml_features`).
+  `player_game_features`, `team_schedule`, and two consumption views
+  (`v_dashboard`, `v_ml_features`).
 - `src/wnba_client.py` — browser-driven wrapper around the (undocumented)
-  stats.wnba.com JSON API.
+  stats.wnba.com JSON API, plus wnba.com's own schedule API.
 - `src/ingest.py` — pulls real data via `wnba_client.py` and loads it
   into the schema.
 - `src/compute_features.py` — rolling/season-average feature computation,
@@ -115,6 +115,9 @@ The dashboard shows, per selected player + season:
 - Hot/cold markers: a z-score vs. each game's entering (prior-games)
   mean/SD, computed client-side in the dashboard, gated to 5+ prior
   played games
+- A "Next Game" line: upcoming opponent (with home/away), the
+  opponent's record and season PPG for/against, and the player's own
+  team's PPG — all from `team_schedule`
 - Rebounds/assists trend, and the full game log
 
 ## 4. Query the flat view directly
@@ -157,6 +160,10 @@ SELECT * FROM v_dashboard WHERE player_name = 'A''ja Wilson' ORDER BY game_date;
    IGNORE` means a game already in the database is never overwritten, so
    a rare after-the-fact box score correction from the API wouldn't be
    picked up without a `--full-refresh`.
+
+8. **`team_schedule` only covers the current season.** It's only used for
+   "next game" lookups, which only makes sense for whichever season is
+   actually in progress, so prior seasons' schedules aren't fetched.
 
 ## Design decisions already locked in
 
