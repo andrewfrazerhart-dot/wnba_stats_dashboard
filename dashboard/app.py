@@ -150,6 +150,48 @@ def load_top_performers(db_path: str, team: str, season: int, n: int = 3):
     return rows
 
 
+def _leaderboard_player_row(g: pd.DataFrame) -> pd.Series:
+    """Per-player aggregation for one stat, given ALL of that player's
+    rows this season (played + DNP, needed for the no-DNP streak)."""
+    g = g.sort_values("game_date")
+    played = g[g["dnp"] == 0]
+    n_games = len(played)
+    avg = played["stat_val"].mean() if n_games else None
+    sd = played["stat_val"].std() if n_games else None  # sample SD (ddof=1): this season is a sample, not the full population
+    avg_minutes = played["minutes"].mean() if n_games else None
+
+    # current streak of consecutive games PLAYED (no DNP), counting back
+    # from the most recent game of the season -- same convention as the
+    # single-player "Current Played Streak" metric above.
+    played_streak_val = 0
+    for dnp in g["dnp"].iloc[::-1]:
+        if dnp == 0:
+            played_streak_val += 1
+        else:
+            break
+
+    # current streak of consecutive PLAYED games at/above (mean - 1 SD),
+    # counting back from the most recent played game -- DNPs don't break
+    # it, same "carries forward" convention used for hot/cold streaks
+    # elsewhere in this dashboard.
+    low = high = above_low_streak = None
+    if n_games and pd.notna(sd):
+        low, high = avg - sd, avg + sd
+        above_low_streak = 0
+        for val in played["stat_val"].iloc[::-1]:
+            if val >= low:
+                above_low_streak += 1
+            else:
+                break
+
+    return pd.Series({
+        "player_name": g["player_name"].iloc[0], "position": g["main_position"].iloc[0],
+        "team": g["team"].iloc[-1], "games": n_games, "avg_minutes": avg_minutes,
+        "played_streak": played_streak_val, "avg": avg, "range_low": low, "range_high": high,
+        "above_low_streak": above_low_streak, "sd": sd,
+    })
+
+
 @st.cache_data(ttl=300)
 def load_consistency_leaderboard(db_path: str, stat_col: str, season: int,
                                   min_games: int = CONSISTENCY_MIN_GAMES, n: int = 30) -> pd.DataFrame:
@@ -164,25 +206,17 @@ def load_consistency_leaderboard(db_path: str, stat_col: str, season: int,
     season = int(season)  # sqlite3 silently fails to match numpy.int64 against an INTEGER column
     conn = sqlite3.connect(db_path)
     df = pd.read_sql(
-        f"""SELECT f.player_id, p.player_name, p.main_position, f.team, f.game_date, f.{stat_col} AS stat_val
+        f"""SELECT f.player_id, p.player_name, p.main_position, f.team, f.game_date, f.dnp,
+                   f.minutes, f.{stat_col} AS stat_val
             FROM fact_player_game f JOIN dim_player p ON p.player_id = f.player_id
-            WHERE f.season = ? AND f.dnp = 0""",
+            WHERE f.season = ?""",
         conn, params=(season,),
     )
     conn.close()
     if df.empty:
         return pd.DataFrame()
 
-    df = df.sort_values("game_date")
-    agg = df.groupby("player_id").agg(
-        player_name=("player_name", "first"),
-        position=("main_position", "first"),
-        team=("team", "last"),  # most recent team this season, handles trades
-        games=("stat_val", "count"),
-        avg=("stat_val", "mean"),
-        sd=("stat_val", "std"),  # sample SD (ddof=1): this season's games are a sample, not the full population
-    ).reset_index(drop=True)
-
+    agg = df.groupby("player_id").apply(_leaderboard_player_row, include_groups=False)
     agg = agg[(agg["games"] >= min_games) & (agg["avg"] > 0)].copy()
     agg["cv_pct"] = (agg["sd"] / agg["avg"]) * 100
     return agg.sort_values("cv_pct", ascending=True).head(n).reset_index(drop=True)
@@ -666,24 +700,38 @@ def render_consistency_leaderboard(db_path, season):
     stat_col = MAJOR_STATS[stat_label]
 
     board = load_consistency_leaderboard(db_path, stat_col, season)
-    st.caption(f"Top 30 most consistent players by {stat_label.lower()} this season ({season}) -- "
-               f"lowest Coefficient of Variation (sample SD ÷ mean), "
-               f"among players with {CONSISTENCY_MIN_GAMES}+ games played. Lower CV = tighter, "
-               f"more predictable game-to-game production relative to their own average.")
+    st.caption(f"Top 30 most consistent players by {stat_label.lower()} this season ({season}), "
+               f"among players with {CONSISTENCY_MIN_GAMES}+ games played -- sorted by CV%, "
+               f"last column. **CV% (Coefficient of Variation)** is the standard deviation "
+               f"expressed as a percentage of the mean (SD ÷ mean × 100): it measures spread "
+               f"*relative to each player's own average*, so a 25 PPG scorer and a 6 PPG scorer "
+               f"can be compared fairly. Lower CV% = more consistent.")
 
     if board.empty:
         st.info(f"Not enough players with {CONSISTENCY_MIN_GAMES}+ played games yet this season "
                 f"to build a leaderboard.")
         return
 
-    display_df = board.rename(columns={
+    avg_col = f"Avg {stat_label}"
+    display_df = board.copy()
+    display_df["range"] = display_df.apply(
+        lambda r: f"{r['range_low']:.1f} – {r['range_high']:.1f}", axis=1)
+    display_df = display_df.rename(columns={
         "player_name": "Player", "position": "Position", "team": "Team", "games": "Games",
-        "avg": f"Avg {stat_label}", "sd": "Std Dev", "cv_pct": "CV %",
+        "avg_minutes": "Avg Minutes", "played_streak": "Games In A Row (No DNP)",
+        "avg": avg_col, "range": "1 SD Range", "above_low_streak": "Streak Above Low",
+        "sd": "Std Dev", "cv_pct": "CV %",
     })
     display_df.insert(0, "Rank", range(1, len(display_df) + 1))
+    display_df = display_df[[
+        "Rank", "Player", "Position", "Team", "Games", "Avg Minutes",
+        "Games In A Row (No DNP)", avg_col, "1 SD Range", "Streak Above Low",
+        "Std Dev", "CV %",
+    ]]
     st.dataframe(
         display_df.style.format({
-            f"Avg {stat_label}": "{:.1f}", "Std Dev": "{:.2f}", "CV %": "{:.1f}%",
+            "Avg Minutes": "{:.1f}", avg_col: "{:.1f}", "Std Dev": "{:.2f}", "CV %": "{:.1f}%",
+            "Streak Above Low": "{:.0f}",
         }),
         hide_index=True, width='stretch', height=600,
     )
