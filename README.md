@@ -61,12 +61,28 @@ python ingest.py --seasons 2026,2025,2024
 This:
 - Fetches the full active roster for the **first** season listed (treated
   as "current") — no need to look up player IDs yourself.
-- Backfills each of those players' game logs for every season listed.
 - Derives DNP rows by diffing each player's own game log against their
   team's full schedule for that season.
-- Rebuilds `data/wnba.db` from scratch each run (so there's no stale mix
-  of old and new data) — takes on the order of 15–25 minutes for the
-  full active roster (~850 API calls, deliberately rate-limited).
+
+**Default mode is incremental** — safe and fast to re-run any time you
+want "what happened since last time":
+- Only the current season is re-checked for new games (past seasons are
+  complete and never change once loaded).
+- Bios and prior-season history are only fetched for players not already
+  in the database (e.g. a new call-up) — everyone else is skipped
+  entirely for that part.
+- Existing rows are never overwritten (`INSERT OR IGNORE`), so re-running
+  never duplicates or corrupts anything.
+- A routine update is ~200 API calls and a few minutes, versus ~1300+
+  calls / 15–25 minutes for a full run.
+
+Add `--full-refresh` to wipe `data/wnba.db` and re-fetch everything from
+scratch instead (e.g. after a schema change, or to clear out old mock
+data):
+
+```bash
+python ingest.py --seasons 2026,2025,2024 --full-refresh
+```
 
 Progress prints per player as it goes; Python buffers stdout when
 redirected to a file, so if you've piped output somewhere, don't worry if
@@ -136,6 +152,11 @@ SELECT * FROM v_dashboard WHERE player_name = 'A''ja Wilson' ORDER BY game_date;
    (parsed from that game's own matchup), so a trade just shows up as a
    change in the `team` column across consecutive `game_id`s — no special
    handling needed there.
+
+7. **Incremental updates don't revise already-loaded games.** `INSERT OR
+   IGNORE` means a game already in the database is never overwritten, so
+   a rare after-the-fact box score correction from the API wouldn't be
+   picked up without a `--full-refresh`.
 
 ## Design decisions already locked in
 

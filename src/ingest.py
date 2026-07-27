@@ -5,13 +5,18 @@ Pulls real WNBA data via wnba_client.py and loads it into the schema in
 sql/schema.sql: dim_player, fact_player_game (including derived DNP
 rows), then runs compute_features.py to populate player_game_features.
 
-Tracks the full active roster for the most recent of --seasons (the
-"current" season) and backfills each of those players' game logs for
-every season in --seasons.
+Default mode is INCREMENTAL: past (non-current) seasons are complete and
+never change once loaded, so re-running this only re-checks the current
+(first-listed) season for new games, and only backfills prior seasons
+for players who aren't in the database yet at all (e.g. a new call-up).
+Existing rows are never overwritten (INSERT OR IGNORE), so re-running
+is always safe. This cuts a routine "what happened since last time"
+update from ~1300 API calls down to ~200.
 
 Run from anywhere -- paths are resolved relative to this file's location:
     cd src
-    python ingest.py --seasons 2026,2025,2024
+    python ingest.py --seasons 2026,2025,2024              # incremental (default)
+    python ingest.py --seasons 2026,2025,2024 --full-refresh  # wipe + rebuild everything
 
 Requires real outbound internet access and `playwright install chromium`
 having been run once (see wnba_client.py for why a real browser is
@@ -187,18 +192,21 @@ def build_player_season_rows(player_id, season, gamelog, team_id, schedule_by_te
     return all_rows
 
 
-def build_schema(db_path):
-    """Always starts fresh -- a full ingest run tracks the whole current
-    active roster, so there's no meaningful partial/incremental state to
-    preserve, and this guarantees no leftover mock data lingers alongside
-    real player IDs."""
+def build_schema(db_path, full_refresh=False):
+    """full_refresh=True wipes any existing database (e.g. to clear out
+    old mock data or start completely clean). Otherwise an existing
+    database is reused as-is -- that's what makes incremental updates
+    possible -- and a schema is only created if the file doesn't exist
+    yet."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
+    if full_refresh and db_path.exists():
         db_path.unlink()
+    is_new = not db_path.exists()
     conn = sqlite3.connect(db_path)
-    with open(SCHEMA_PATH) as f:
-        conn.executescript(f.read())
-    conn.commit()
+    if is_new:
+        with open(SCHEMA_PATH) as f:
+            conn.executescript(f.read())
+        conn.commit()
     return conn
 
 
@@ -235,86 +243,142 @@ def insert_games(conn, rows):
     conn.commit()
 
 
+def fetch_prior_season_data(client, season, player_ids_needing_backfill):
+    """Only called for seasons/players that actually need first-time
+    backfill -- fetches a roster snapshot for `season` (to find each
+    player's team that season) and team schedules for just the teams
+    those specific players were on, not the whole league."""
+    season_roster = client.get_active_players(season)
+    abbrev_map = {p["TEAM_ABBREVIATION"]: p["TEAM_ID"] for p in season_roster if p["TEAM_ID"]}
+    team_id_by_player = {p["PERSON_ID"]: p["TEAM_ID"] or None for p in season_roster}
+
+    relevant_team_ids = sorted({
+        team_id_by_player[pid] for pid in player_ids_needing_backfill
+        if team_id_by_player.get(pid)
+    })
+    schedule_by_team, score_by_game_team = fetch_team_schedules(client, season, relevant_team_ids)
+    return team_id_by_player, abbrev_map, schedule_by_team, score_by_game_team
+
+
+def recompute_features_for_seasons(conn, seasons):
+    """Recomputes player_game_features for exactly the seasons touched
+    this run -- a pure local operation (no API calls), so it's cheap to
+    always do for the current season, but there's no need to touch
+    prior seasons unless a new player's history was just backfilled
+    into them."""
+    if not seasons:
+        return 0
+    placeholders = ", ".join("?" * len(seasons))
+    conn.execute(f"DELETE FROM player_game_features WHERE season IN ({placeholders})", seasons)
+    cols = [c[0] for c in conn.execute("SELECT * FROM fact_player_game LIMIT 0").description]
+    rows = [
+        dict(zip(cols, row))
+        for row in conn.execute(
+            f"SELECT * FROM fact_player_game WHERE season IN ({placeholders})", seasons
+        ).fetchall()
+    ]
+    features = compute_features(rows)
+    insert_features(conn, features)
+    return len(features)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--seasons", default="2026,2025,2024",
                          help="Comma-separated, most-recent (current) season first.")
+    parser.add_argument("--full-refresh", action="store_true",
+                         help="Wipe the database and re-fetch everything from scratch. "
+                              "Default is incremental: only the current season is "
+                              "re-checked, and prior seasons are only backfilled for "
+                              "players not already in the database.")
     args = parser.parse_args()
 
     db_path = Path(args.db)
     seasons = [int(s) for s in args.seasons.split(",")]
     current_season = seasons[0]
+    prior_seasons = seasons[1:]
 
-    conn = build_schema(db_path)
+    conn = build_schema(db_path, full_refresh=args.full_refresh)
+    existing_player_ids = {row[0] for row in conn.execute("SELECT player_id FROM dim_player")}
 
     with WNBAClient() as client:
         print(f"Fetching active roster for {current_season}...")
         roster = client.get_active_players(current_season)
-        print(f"  {len(roster)} active players found.")
-
-        # per-season roster snapshot -> player's team_id that season + abbrev map
-        team_id_by_player_season = {}
-        abbrev_to_team_id_by_season = {}
-        team_ids_by_season = {}
-        for season in seasons:
-            season_roster = roster if season == current_season else client.get_active_players(season)
-            abbrev_map = {}
-            for p in season_roster:
-                if p["TEAM_ID"]:
-                    abbrev_map[p["TEAM_ABBREVIATION"]] = p["TEAM_ID"]
-                team_id_by_player_season[(p["PERSON_ID"], season)] = p["TEAM_ID"] or None
-            abbrev_to_team_id_by_season[season] = abbrev_map
-            team_ids_by_season[season] = sorted(set(abbrev_map.values()))
-
-        schedule_and_scores_by_season = {}
-        for season in seasons:
-            print(f"Fetching team schedules for {season} "
-                  f"({len(team_ids_by_season[season])} teams)...")
-            schedule_and_scores_by_season[season] = fetch_team_schedules(
-                client, season, team_ids_by_season[season]
-            )
+        new_player_ids = {p["PERSON_ID"] for p in roster if p["PERSON_ID"] not in existing_player_ids}
+        print(f"  {len(roster)} active players found ({len(new_player_ids)} not yet tracked).")
 
         players_by_id = {}
+        for p in roster:
+            if p["PERSON_ID"] not in new_player_ids:
+                continue  # bio barely ever changes -- skip refetching for known players
+            try:
+                bio = client.get_player_bio(p["PERSON_ID"])
+                if bio:
+                    players_by_id[p["PERSON_ID"]] = build_dim_player_row(bio)
+            except Exception as e:
+                print(f"  bio fetch failed for {p['DISPLAY_FIRST_LAST']}: {e}")
+
+        # current season: always refresh for everyone, since new games can
+        # appear for any tracked player, not just new ones
+        current_abbrev_map = {p["TEAM_ABBREVIATION"]: p["TEAM_ID"] for p in roster if p["TEAM_ID"]}
+        current_team_ids = sorted(set(current_abbrev_map.values()))
+        print(f"Fetching team schedules for {current_season} ({len(current_team_ids)} teams)...")
+        cur_schedule, cur_scores = fetch_team_schedules(client, current_season, current_team_ids)
+
+        # prior seasons: only fetched at all if someone actually needs backfill,
+        # and only for the teams those specific players were on
+        prior_season_data = {}
+        for season in prior_seasons:
+            if not new_player_ids:
+                continue
+            print(f"Fetching backfill data for {season} ({len(new_player_ids)} new player(s))...")
+            prior_season_data[season] = fetch_prior_season_data(client, season, new_player_ids)
+
         all_fact_rows = []
         n_players = len(roster)
+        touched_seasons = {current_season}
         for i, p in enumerate(roster, start=1):
             player_id = p["PERSON_ID"]
             print(f"[{i}/{n_players}] {p['DISPLAY_FIRST_LAST']} ({p['TEAM_ABBREVIATION']})...", end=" ")
             try:
-                bio = client.get_player_bio(player_id)
-                if bio:
-                    players_by_id[player_id] = build_dim_player_row(bio)
-
-                player_row_count = 0
-                for season in seasons:
-                    team_id = team_id_by_player_season.get((player_id, season))
-                    if team_id is None:
-                        continue  # player wasn't rostered this season -- nothing to fetch
-                    schedule_by_team, score_by_game_team = schedule_and_scores_by_season[season]
-                    gamelog = client.get_player_gamelog(player_id, season, SEASON_TYPE)
+                row_count = 0
+                if p["TEAM_ID"]:
+                    gamelog = client.get_player_gamelog(player_id, current_season, SEASON_TYPE)
                     rows = build_player_season_rows(
-                        player_id, season, gamelog, team_id, schedule_by_team,
-                        score_by_game_team, abbrev_to_team_id_by_season[season],
+                        player_id, current_season, gamelog, p["TEAM_ID"],
+                        cur_schedule, cur_scores, current_abbrev_map,
                     )
                     all_fact_rows.extend(rows)
-                    player_row_count += len(rows)
-                print(f"{player_row_count} games.")
+                    row_count += len(rows)
+
+                if player_id in new_player_ids:
+                    for season in prior_seasons:
+                        if season not in prior_season_data:
+                            continue
+                        team_id_by_player, abbrev_map, schedule_by_team, score_by_game_team = prior_season_data[season]
+                        team_id = team_id_by_player.get(player_id)
+                        if team_id is None:
+                            continue
+                        gamelog = client.get_player_gamelog(player_id, season, SEASON_TYPE)
+                        rows = build_player_season_rows(
+                            player_id, season, gamelog, team_id,
+                            schedule_by_team, score_by_game_team, abbrev_map,
+                        )
+                        all_fact_rows.extend(rows)
+                        row_count += len(rows)
+                        touched_seasons.add(season)
+                print(f"{row_count} games.")
             except Exception as e:
                 print(f"SKIPPED ({type(e).__name__}: {e})")
 
-    print(f"\nInserting {len(players_by_id)} players and {len(all_fact_rows)} game rows...")
+    print(f"\nInserting {len(players_by_id)} new player(s) and {len(all_fact_rows)} game rows "
+          f"(existing rows are skipped automatically)...")
     insert_players(conn, players_by_id)
     insert_games(conn, all_fact_rows)
 
-    print("Computing rolling/season features...")
-    conn.execute("DELETE FROM player_game_features")
-    all_games_in_db = [
-        dict(zip([c[0] for c in conn.execute("SELECT * FROM fact_player_game LIMIT 0").description], row))
-        for row in conn.execute("SELECT * FROM fact_player_game").fetchall()
-    ]
-    features = compute_features(all_games_in_db)
-    insert_features(conn, features)
+    print(f"Recomputing features for season(s): {sorted(touched_seasons)}...")
+    n_features = recompute_features_for_seasons(conn, sorted(touched_seasons))
 
     n_players_total = conn.execute("SELECT COUNT(*) FROM dim_player").fetchone()[0]
     n_games_total = conn.execute("SELECT COUNT(*) FROM fact_player_game").fetchone()[0]
@@ -322,7 +386,7 @@ def main():
     print(f"\nDone. Database at: {db_path}")
     print(f"  players (total in db):     {n_players_total}")
     print(f"  player-game rows (total):  {n_games_total}  ({n_dnp_total} DNP)")
-    print(f"  feature rows:              {len(features)}")
+    print(f"  feature rows recomputed:   {n_features}")
 
     conn.close()
 
