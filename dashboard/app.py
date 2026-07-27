@@ -453,7 +453,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     logo_url = team_logo_url(load_team_id(db_path, player_team))
     logo_html = f'<img src="{logo_url}" style="height:2.25rem; margin-left:10px;">' if logo_url else ""
     st.markdown(
-        f'<div style="display:flex; align-items:center;">'
+        f'<div id="player-panel-{panel_key}" style="display:flex; align-items:center;">'
         f'<h1 style="margin:0; padding:0;">{bio.player_name}</h1>{logo_html}</div>',
         unsafe_allow_html=True,
     )
@@ -550,6 +550,48 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
         hr.style.format({c: "{:.0f}%" for c in ["Overall", "Home", "Away", "Last 5", "Last 14 Days"]}),
         hide_index=True, width='stretch', key=f"threshold_table_{panel_key}",
     )
+
+    st.divider()
+
+    # ---------------------------------------------------------------
+    # Full game log -- reads the Hot/Cold Markers stat straight from
+    # session_state rather than rendering another dropdown here, since
+    # that section (further down) already owns the actual "Stat" picker
+    # for this; both read/write the same shared key so they always agree.
+    # ---------------------------------------------------------------
+    hotcold_stat_label_for_log = st.session_state.get("hotcold_stat_shared", "Points")
+    hc_for_log = add_hot_cold(played, HOTCOLD_STAT_OPTIONS[hotcold_stat_label_for_log])
+
+    log_source = season_df.merge(
+        hc_for_log[["game_id", "hot_cold_z", "is_hot", "is_cold"]], on="game_id", how="left",
+    )
+    log_df = log_source[[
+        "game_date", "opponent", "home_away", "result", "dnp",
+        "minutes", "pts", "reb_tot", "ast", "stl", "blk", "tov", "game_score",
+        "season_avg_pts_prior", "avg_pts_l5_prior", "avg_pts_l14d_prior",
+        "hot_cold_z", "is_hot", "is_cold",
+    ]].sort_values("game_date", ascending=False).copy()
+    log_df["game_date"] = log_df["game_date"].dt.strftime("%Y-%m-%d")
+    log_df["dnp"] = log_df["dnp"].map({1: "Yes", 0: ""})
+    log_df["season_avg_pts_prior"] = log_df["season_avg_pts_prior"].round(1)
+    log_df["hot_cold_z"] = log_df["hot_cold_z"].round(2)
+    log_df = log_df.rename(columns={
+        "dnp": "DNP", "hot_cold_z": f"{hotcold_stat_label_for_log} z", "is_hot": "Hot", "is_cold": "Cold",
+        "season_avg_pts_prior": "PTS season avg (to date)",
+        "avg_pts_l5_prior": "PTS L5 avg", "avg_pts_l14d_prior": "PTS L14d avg",
+    })
+
+    if compact:
+        # expanders don't support an anchor -- a bare id div gives the
+        # sidebar "Game Log" link something to jump to even in compare mode
+        st.markdown(f'<div id="game-log-{panel_key}"></div>', unsafe_allow_html=True)
+        with st.expander("Game Log", key=f"gamelog_expander_{panel_key}"):
+            st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
+    else:
+        st.subheader("Game Log", anchor=f"game-log-{panel_key}")
+        st.caption("Includes DNP games (all box-score stats blank) so you can see missed games "
+                   "relative to games actually played.")
+        st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
 
     st.divider()
 
@@ -651,42 +693,6 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     else:
         st.info(f"Not enough played games yet this season to compute hot/cold markers "
                 f"(needs {HOT_COLD_MIN_GAMES}+ prior played games).")
-
-    st.divider()
-
-    # ---------------------------------------------------------------
-    # Full game log
-    # ---------------------------------------------------------------
-    log_source = season_df.merge(
-        hc[["game_id", "hot_cold_z", "is_hot", "is_cold"]], on="game_id", how="left",
-    )
-    log_df = log_source[[
-        "game_date", "opponent", "home_away", "result", "dnp",
-        "minutes", "pts", "reb_tot", "ast", "stl", "blk", "tov", "game_score",
-        "season_avg_pts_prior", "avg_pts_l5_prior", "avg_pts_l14d_prior",
-        "hot_cold_z", "is_hot", "is_cold",
-    ]].sort_values("game_date", ascending=False).copy()
-    log_df["game_date"] = log_df["game_date"].dt.strftime("%Y-%m-%d")
-    log_df["dnp"] = log_df["dnp"].map({1: "Yes", 0: ""})
-    log_df["season_avg_pts_prior"] = log_df["season_avg_pts_prior"].round(1)
-    log_df["hot_cold_z"] = log_df["hot_cold_z"].round(2)
-    log_df = log_df.rename(columns={
-        "dnp": "DNP", "hot_cold_z": f"{hotcold_stat_label} z", "is_hot": "Hot", "is_cold": "Cold",
-        "season_avg_pts_prior": "PTS season avg (to date)",
-        "avg_pts_l5_prior": "PTS L5 avg", "avg_pts_l14d_prior": "PTS L14d avg",
-    })
-
-    if compact:
-        # expanders don't support an anchor -- a bare id div gives the
-        # sidebar "Game Log" link something to jump to even in compare mode
-        st.markdown(f'<div id="game-log-{panel_key}"></div>', unsafe_allow_html=True)
-        with st.expander("Game Log", key=f"gamelog_expander_{panel_key}"):
-            st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
-    else:
-        st.subheader("Game Log", anchor=f"game-log-{panel_key}")
-        st.caption("Includes DNP games (all box-score stats blank) so you can see missed games "
-                   "relative to games actually played.")
-        st.dataframe(log_df, hide_index=True, width='stretch', height=400, key=f"gamelog_{panel_key}")
 
 
 def render_consistency_leaderboard(db_path, season):
@@ -825,7 +831,6 @@ def main():
     st.sidebar.markdown("[Game Log](#game-log-p1)")
 
     st.sidebar.divider()
-    st.sidebar.subheader("Leaderboard")
     synced_selectbox(st.sidebar, "Consistency Leaderboard for Safer Bets", list(MAJOR_STATS.keys()),
                       "consistency_stat_shared", "consistency_stat_sidebar", anchor="consistency-leaderboard")
 
@@ -837,6 +842,20 @@ def main():
             render_player_panel(db_path, player_id_2, season_2, compact=True, panel_key="p2")
     else:
         render_player_panel(db_path, player_id_1, season_1, compact=False, panel_key="p1")
+
+    if pending_jump:
+        # scroll back to the top of the player panel after a leaderboard
+        # click -- plain st.markdown doesn't execute <script> tags even
+        # with unsafe_allow_html, so this needs st.iframe (raw HTML
+        # strings run with JS execution + same-origin access), reaching
+        # out to the real page via window.parent
+        st.iframe(
+            "<script>"
+            "window.parent.document.getElementById('player-panel-p1')"
+            ".scrollIntoView({behavior: 'instant', block: 'start'});"
+            "</script>",
+            height=1,
+        )
 
     st.divider()
     render_consistency_leaderboard(db_path, season_1)
