@@ -101,6 +101,28 @@ def add_dnp_markers(fig, dnp_games: pd.DataFrame, y_value=0):
     )
 
 
+def synced_selectbox(container, label, options, shared_key, widget_key):
+    """A selectbox that can be rendered in multiple places at once (e.g.
+    the sidebar AND inline in one or two panels) while staying in sync --
+    changing any instance updates the others on the next rerun.
+
+    Streamlit normally lets a widget's own session_state (tied to its
+    `key`) "win" over anything else once that key has been used, so
+    simply passing `index=` from a shared value only works on the very
+    first render. Instead, this pushes the current shared value into
+    this instance's own key right before creating it, every rerun --
+    that's what makes every instance track the shared value, not just
+    whichever one the user directly touched."""
+    if shared_key not in st.session_state:
+        st.session_state[shared_key] = options[0]
+    st.session_state[widget_key] = st.session_state[shared_key]
+
+    def _sync():
+        st.session_state[shared_key] = st.session_state[widget_key]
+
+    return container.selectbox(label, options, key=widget_key, on_change=_sync)
+
+
 MAJOR_STATS = {"Points": "pts", "Rebounds": "reb_tot", "Assists": "ast",
                "Steals": "stl", "Blocks": "blk", "Turnovers": "tov"}
 
@@ -182,8 +204,7 @@ def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) 
     return pd.DataFrame(rows)
 
 
-def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_stat_label,
-                         hotcoldtrend_stat_label, hotcold_stat_label, compact=False, panel_key="p1"):
+def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1"):
     """Renders one player's full panel: header, all charts, game log.
     `compact=True` (used in compare mode, where two of these sit side by
     side) tucks the game log behind a collapsed expander so two full game
@@ -191,7 +212,11 @@ def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_
     every widget a unique key -- needed because compare mode can show the
     same player/season on both sides (e.g. comparing two seasons of the
     same player isn't actually asked for here, but nothing should break
-    if two panels happen to render identical content)."""
+    if two panels happen to render identical content).
+
+    The four stat-picker dropdowns are rendered inline here (same spot
+    as before compare mode existed) AND in the sidebar -- both are kept
+    in sync via synced_selectbox()."""
     df = load_player_games(db_path, player_id)
     season_df = df[df.season == season].reset_index(drop=True)
     played = season_df[season_df.dnp == 0].copy()
@@ -226,6 +251,9 @@ def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_
     # Threshold hit-rates
     # ---------------------------------------------------------------
     st.subheader("Threshold Hit-Rates")
+    threshold_stat_label = synced_selectbox(
+        st, "Stat", list(THRESHOLD_STAT_OPTIONS.keys()),
+        "threshold_stat_shared", f"threshold_stat_inline_{panel_key}")
     threshold_col, thresholds, threshold_short_label = THRESHOLD_STAT_OPTIONS[threshold_stat_label]
 
     hr = hit_rate_table(played, threshold_col, thresholds, threshold_short_label)
@@ -250,6 +278,9 @@ def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_
     # Stat trend (single stat, selectable)
     # ---------------------------------------------------------------
     st.subheader("Stat Trend")
+    trend_stat_label = synced_selectbox(
+        st, "Stat", list(MAJOR_STATS.keys()),
+        "trend_stat_shared", f"trend_stat_inline_{panel_key}")
     trend_stat_col = MAJOR_STATS[trend_stat_label]
 
     rolling_df = rolling_prior_averages(season_df, trend_stat_col)
@@ -274,6 +305,9 @@ def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_
     # Rolling hot / cold trend
     # ---------------------------------------------------------------
     st.subheader("Rolling Hot / Cold Trend")
+    hotcoldtrend_stat_label = synced_selectbox(
+        st, "Stat", list(MAJOR_STATS.keys()),
+        "hotcoldtrend_stat_shared", f"hotcoldtrend_stat_inline_{panel_key}")
     hotcoldtrend_stat_col = MAJOR_STATS[hotcoldtrend_stat_label]
     st.caption(f"{hotcoldtrend_stat_label} per game vs. rolling 5-game and trailing 14-day averages "
                f"(entering each game, leakage-safe)")
@@ -306,6 +340,9 @@ def render_player_panel(db_path, player_id, season, threshold_stat_label, trend_
     st.caption("Games flagged ≥1 SD above/below the player's own to-date mean, entering that game "
                "(leakage-safe) — plus the current streak of consecutive hot/cold games.")
 
+    hotcold_stat_label = synced_selectbox(
+        st, "Stat", list(HOTCOLD_STAT_OPTIONS.keys()),
+        "hotcold_stat_shared", f"hotcold_stat_inline_{panel_key}")
     hotcold_stat_col = HOTCOLD_STAT_OPTIONS[hotcold_stat_label]
     hc = add_hot_cold(played, hotcold_stat_col)
     valid = hc[hc["hot_cold_z"].notna()]
@@ -412,26 +449,24 @@ def main():
 
     st.sidebar.divider()
     st.sidebar.subheader("Chart Settings")
-    threshold_stat_label = st.sidebar.selectbox(
-        "Threshold Hit-Rates stat", list(THRESHOLD_STAT_OPTIONS.keys()), key="threshold_stat")
-    trend_stat_label = st.sidebar.selectbox(
-        "Stat Trend stat", list(MAJOR_STATS.keys()), key="trend_stat")
-    hotcoldtrend_stat_label = st.sidebar.selectbox(
-        "Rolling Hot/Cold Trend stat", list(MAJOR_STATS.keys()), key="hotcoldtrend_stat")
-    hotcold_stat_label = st.sidebar.selectbox(
-        "Hot/Cold Markers stat", list(HOTCOLD_STAT_OPTIONS.keys()), key="hotcold_stat")
+    st.sidebar.caption("Also editable inline, right above each chart -- both stay in sync.")
+    synced_selectbox(st.sidebar, "Threshold Hit-Rates stat", list(THRESHOLD_STAT_OPTIONS.keys()),
+                      "threshold_stat_shared", "threshold_stat_sidebar")
+    synced_selectbox(st.sidebar, "Stat Trend stat", list(MAJOR_STATS.keys()),
+                      "trend_stat_shared", "trend_stat_sidebar")
+    synced_selectbox(st.sidebar, "Rolling Hot/Cold Trend stat", list(MAJOR_STATS.keys()),
+                      "hotcoldtrend_stat_shared", "hotcoldtrend_stat_sidebar")
+    synced_selectbox(st.sidebar, "Hot/Cold Markers stat", list(HOTCOLD_STAT_OPTIONS.keys()),
+                      "hotcold_stat_shared", "hotcold_stat_sidebar")
 
     if compare and player_id_2 is not None:
         col1, col2 = st.columns(2)
         with col1:
-            render_player_panel(db_path, player_id_1, season_1, threshold_stat_label, trend_stat_label,
-                                 hotcoldtrend_stat_label, hotcold_stat_label, compact=True, panel_key="p1")
+            render_player_panel(db_path, player_id_1, season_1, compact=True, panel_key="p1")
         with col2:
-            render_player_panel(db_path, player_id_2, season_2, threshold_stat_label, trend_stat_label,
-                                 hotcoldtrend_stat_label, hotcold_stat_label, compact=True, panel_key="p2")
+            render_player_panel(db_path, player_id_2, season_2, compact=True, panel_key="p2")
     else:
-        render_player_panel(db_path, player_id_1, season_1, threshold_stat_label, trend_stat_label,
-                             hotcoldtrend_stat_label, hotcold_stat_label, compact=False, panel_key="p1")
+        render_player_panel(db_path, player_id_1, season_1, compact=False, panel_key="p1")
 
 
 if __name__ == "__main__":
