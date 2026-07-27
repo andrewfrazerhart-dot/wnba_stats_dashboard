@@ -176,6 +176,19 @@ def streak(flags: pd.Series) -> int:
     return count
 
 
+def played_streak(season_df: pd.DataFrame) -> int:
+    """Current number of consecutive games PLAYED, counting back from the
+    most recent game in the season -- resets to 0 the moment a DNP is hit."""
+    ordered = season_df.sort_values("game_date")
+    count = 0
+    for dnp in ordered["dnp"].iloc[::-1]:
+        if dnp == 0:
+            count += 1
+        else:
+            break
+    return count
+
+
 def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) -> pd.DataFrame:
     """Hit-rate for each threshold, split several ways: overall, home/away,
     and recent form (last 5 played games, last 14 calendar days) -- the
@@ -234,16 +247,24 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     st.title(bio.player_name)
     st.caption(f"{played.iloc[-1].team} · {bio.position_detail} ({bio.main_position}) · {season} season")
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Season Avg PTS", f"{played.pts.mean():.1f}")
     m2.metric("Season Avg REB", f"{played.reb_tot.mean():.1f}")
     m3.metric("Season Avg AST", f"{played.ast.mean():.1f}")
-    m4, m5, m6 = st.columns(3)
     m4.metric("Games Played", f"{len(played)}")
+
+    m5, m6, m7, m8 = st.columns(4)
     m5.metric("Games Missed (DNP)", f"{(season_df.dnp == 1).sum()}")
+    m6.metric("Current Played Streak", f"{played_streak(season_df)} game(s)")
+
     last5_pts = played.tail(5)["pts"].mean()
-    delta = last5_pts - played.pts.mean()
-    m6.metric("L5 Avg PTS", f"{last5_pts:.1f}", delta=f"{delta:+.1f} vs season")
+    delta5 = last5_pts - played.pts.mean()
+    m7.metric("L5 Avg PTS", f"{last5_pts:.1f}", delta=f"{delta5:+.1f} vs season")
+
+    most_recent_date = played["game_date"].max()
+    last14d_pts = played.loc[played["game_date"] >= most_recent_date - pd.Timedelta(days=14), "pts"].mean()
+    delta14 = last14d_pts - played.pts.mean()
+    m8.metric("L14D Avg PTS", f"{last14d_pts:.1f}", delta=f"{delta14:+.1f} vs season")
 
     st.divider()
 
