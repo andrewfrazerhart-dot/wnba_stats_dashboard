@@ -373,17 +373,18 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Season Avg PTS", f"{played.pts.mean():.1f}")
-    m2.metric("Season Avg REB", f"{played.reb_tot.mean():.1f}")
-    m3.metric("Season Avg AST", f"{played.ast.mean():.1f}")
 
     last5_pts = played.tail(5)["pts"].mean()
     delta5 = last5_pts - played.pts.mean()
-    m4.metric("L5 Avg PTS", f"{last5_pts:.1f}", delta=f"{delta5:+.1f} vs season")
+    m2.metric("L5 Avg PTS", f"{last5_pts:.1f}", delta=f"{delta5:+.1f} vs season")
 
     most_recent_date = played["game_date"].max()
     last14d_pts = played.loc[played["game_date"] >= most_recent_date - pd.Timedelta(days=14), "pts"].mean()
     delta14 = last14d_pts - played.pts.mean()
-    m5.metric("L14D Avg PTS", f"{last14d_pts:.1f}", delta=f"{delta14:+.1f} vs season")
+    m3.metric("L14D Avg PTS", f"{last14d_pts:.1f}", delta=f"{delta14:+.1f} vs season")
+
+    m4.metric("Season Avg REB", f"{played.reb_tot.mean():.1f}")
+    m5.metric("Season Avg AST", f"{played.ast.mean():.1f}")
 
     # narrower columns (+ an unused spacer) so these 3 cluster together on
     # the left instead of stretching across the full row width like the
@@ -611,6 +612,7 @@ def sidebar_player_picker(db_path, teams, suffix, label_suffix=""):
 
 def main():
     st.set_page_config(page_title="WNBA Player Stats Dashboard", layout="wide")
+    st.title("WNBA Player-Game Data Dashboard")
     db_path = get_db_path()
     teams = load_teams(db_path)
 
