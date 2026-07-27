@@ -13,6 +13,7 @@ Run:
 
 import sqlite3
 import sys
+from datetime import date
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -20,6 +21,7 @@ import streamlit as st
 
 DEFAULT_DB = "../data/wnba.db"
 HOT_COLD_MIN_GAMES = 5  # min prior played games before a hot/cold read is shown
+TEAM_LOGO_URL = "https://cdn.wnba.com/logos/wnba/{team_id}/primary/L/logo.svg"
 
 
 def get_db_path() -> str:
@@ -113,6 +115,45 @@ def load_next_game_info(db_path: str, team: str, season: int):
         opp_ppg_for=opp_ppg_for, opp_ppg_against=opp_ppg_against,
         team_ppg_for=team_ppg_for,
     )
+
+
+@st.cache_data(ttl=300)
+def load_player_bio(db_path: str, player_id: int):
+    """birthdate + height_in -- not in v_dashboard (which only pulls
+    player_id/name/position from dim_player), so a separate lookup."""
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT birthdate, height_in FROM dim_player WHERE player_id = ?", (player_id,)
+    ).fetchone()
+    conn.close()
+    return row if row else (None, None)
+
+
+@st.cache_data(ttl=300)
+def load_team_id(db_path: str, team: str):
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT team_id FROM dim_team WHERE team = ?", (team,)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def team_logo_url(team_id):
+    return TEAM_LOGO_URL.format(team_id=team_id) if team_id else None
+
+
+def compute_age(birthdate_str):
+    if not birthdate_str:
+        return None
+    b = date.fromisoformat(birthdate_str)
+    today = date.today()
+    return today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+
+
+def format_height(height_in):
+    if height_in is None:
+        return None
+    feet, inches = divmod(int(height_in), 12)
+    return f"{feet}'{inches}\""
 
 
 def add_hot_cold(played: pd.DataFrame, stat: str) -> pd.DataFrame:
@@ -287,12 +328,28 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
         return
 
     bio = season_df.iloc[0]
+    player_team = played.iloc[-1].team
 
     # ---------------------------------------------------------------
     # Header
     # ---------------------------------------------------------------
-    st.title(bio.player_name)
-    st.caption(f"{played.iloc[-1].team} · {bio.position_detail} ({bio.main_position}) · {season} season")
+    birthdate, height_in = load_player_bio(db_path, player_id)
+    age = compute_age(birthdate)
+    height_str = format_height(height_in)
+
+    logo_col, title_col = st.columns([1, 8])
+    logo_url = team_logo_url(load_team_id(db_path, player_team))
+    if logo_url:
+        logo_col.image(logo_url, width=72)
+    with title_col:
+        st.title(bio.player_name)
+        caption_parts = [player_team, f"{bio.position_detail} ({bio.main_position})"]
+        if age is not None:
+            caption_parts.append(f"{age} yrs")
+        if height_str:
+            caption_parts.append(height_str)
+        caption_parts.append(f"{season} season")
+        st.caption(" · ".join(caption_parts))
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Season Avg PTS", f"{played.pts.mean():.1f}")
@@ -308,17 +365,22 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     delta14 = last14d_pts - played.pts.mean()
     m5.metric("L14D Avg PTS", f"{last14d_pts:.1f}", delta=f"{delta14:+.1f} vs season")
 
-    m6, m7, m8 = st.columns(3)
+    # narrower columns (+ an unused spacer) so these 3 cluster together on
+    # the left instead of stretching across the full row width like the
+    # rows above/below
+    m6, m7, m8, _spacer = st.columns([1, 1, 1, 3])
     m6.metric("Games Played", f"{len(played)}")
     m7.metric("Games Missed (DNP)", f"{(season_df.dnp == 1).sum()}")
     m8.metric("Current Played Streak", f"{played_streak(season_df)} game(s)")
 
-    player_team = played.iloc[-1].team
     next_game = load_next_game_info(db_path, player_team, season)
     st.markdown("**Next Game**")
     if next_game:
         opp = next_game["opponent"]
-        ng1, ng2, ng3, ng4, ng5 = st.columns(5)
+        opp_logo_url = team_logo_url(load_team_id(db_path, opp))
+        ng_logo, ng1, ng2, ng3, ng4, ng5 = st.columns([1, 2, 2, 2, 2, 2])
+        if opp_logo_url:
+            ng_logo.image(opp_logo_url, width=48)
         ng1.metric("Opponent", f"{opp} ({next_game['home_away']})")
         ng2.metric(f"{opp} Record",
                    f"{next_game['opp_wins']}-{next_game['opp_losses']}"

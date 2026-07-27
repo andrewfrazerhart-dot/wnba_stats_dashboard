@@ -208,6 +208,12 @@ CREATE TABLE IF NOT EXISTS team_schedule (
     PRIMARY KEY (season, team, game_id)
 );
 CREATE INDEX IF NOT EXISTS idx_team_schedule_team_season ON team_schedule(team, season);
+
+CREATE TABLE IF NOT EXISTS dim_team (
+    team            TEXT PRIMARY KEY,
+    team_id         INTEGER NOT NULL,
+    team_name       TEXT
+);
 """
 
 
@@ -260,6 +266,28 @@ def build_team_schedule_rows(game_dates, season):
                 team_wins=away["wins"], team_losses=away["losses"],
             ))
     return rows
+
+
+def build_dim_team_rows(game_dates):
+    """tricode -> numeric team_id + display name, deduped, straight from
+    the same schedule feed -- no extra API calls needed."""
+    teams = {}
+    for gd in game_dates:
+        for g in gd["games"]:
+            for side in (g["homeTeam"], g["awayTeam"]):
+                teams[side["teamTricode"]] = dict(
+                    team=side["teamTricode"], team_id=side["teamId"],
+                    team_name=f"{side['teamCity']} {side['teamName']}",
+                )
+    return list(teams.values())
+
+
+def insert_dim_team(conn, rows):
+    conn.executemany(
+        "INSERT OR REPLACE INTO dim_team (team, team_id, team_name) VALUES (?, ?, ?)",
+        [(r["team"], r["team_id"], r["team_name"]) for r in rows],
+    )
+    conn.commit()
 
 
 def insert_team_schedule(conn, season, rows):
@@ -379,9 +407,11 @@ def main():
         print(f"Fetching full league schedule for {current_season}...")
         game_dates = client.get_schedule(current_season)
         schedule_rows = build_team_schedule_rows(game_dates, current_season)
+        dim_team_rows = build_dim_team_rows(game_dates)
         n_final = sum(1 for r in schedule_rows if r["status"] == "Final") // 2
         n_scheduled = sum(1 for r in schedule_rows if r["status"] == "Scheduled") // 2
-        print(f"  {n_final} completed games, {n_scheduled} upcoming games.")
+        print(f"  {n_final} completed games, {n_scheduled} upcoming games, "
+              f"{len(dim_team_rows)} teams.")
 
         players_by_id = {}
         for p in roster:
@@ -452,6 +482,7 @@ def main():
     insert_players(conn, players_by_id)
     insert_games(conn, all_fact_rows)
     insert_team_schedule(conn, current_season, schedule_rows)
+    insert_dim_team(conn, dim_team_rows)
 
     print(f"Recomputing features for season(s): {sorted(touched_seasons)}...")
     n_features = recompute_features_for_seasons(conn, sorted(touched_seasons))

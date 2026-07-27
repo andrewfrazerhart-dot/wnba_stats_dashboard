@@ -221,3 +221,17 @@ CREATE TABLE IF NOT EXISTS team_schedule (
 );
 
 CREATE INDEX IF NOT EXISTS idx_team_schedule_team_season ON team_schedule(team, season);
+
+-- ============================================================
+-- dim_team: tricode -> numeric team_id + display name. Small, stable
+-- reference data (franchises rarely change ID), populated for free
+-- from the same schedule fetch that builds team_schedule. Exists
+-- mainly so the dashboard can build team logo URLs
+-- (cdn.wnba.com/logos/wnba/{team_id}/...), which are keyed by the
+-- numeric ID, not the tricode.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS dim_team (
+    team            TEXT PRIMARY KEY,
+    team_id         INTEGER NOT NULL,
+    team_name       TEXT
+);
