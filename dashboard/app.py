@@ -612,7 +612,10 @@ def sidebar_player_picker(db_path, teams, suffix, label_suffix=""):
 
 def main():
     st.set_page_config(page_title="WNBA Player Stats Dashboard", layout="wide")
-    st.title("WNBA Player-Game Data Dashboard")
+    st.markdown(
+        '<h1 style="text-align:center;">WNBA Player-Game Data Dashboard</h1>',
+        unsafe_allow_html=True,
+    )
     db_path = get_db_path()
     teams = load_teams(db_path)
 
