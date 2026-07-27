@@ -131,11 +131,13 @@ def load_next_game_info(db_path: str, team: str, season: int):
 @st.cache_data(ttl=300)
 def load_top_performers(db_path: str, team: str, season: int, n: int = 3):
     """Top n players on `team` this season by average Game Score (played
-    games only) -- used to preview the upcoming opponent's best players."""
+    games only) -- used to preview the upcoming opponent's best players.
+    Also pulls position and PPG so the display line can show more than
+    just a name."""
     season = int(season)  # sqlite3 silently fails to match numpy.int64 against an INTEGER column
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
-        """SELECT p.player_name, AVG(f.game_score) AS avg_gs
+        """SELECT p.player_name, p.main_position, AVG(f.game_score) AS avg_gs, AVG(f.pts) AS avg_pts
            FROM fact_player_game f JOIN dim_player p ON p.player_id = f.player_id
            WHERE f.team = ? AND f.season = ? AND f.dnp = 0
            GROUP BY f.player_id
@@ -440,7 +442,10 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
 
         top_performers = load_top_performers(db_path, opp, season)
         if top_performers:
-            names = ", ".join(f"{name} ({avg_gs:.1f})" for name, avg_gs in top_performers)
+            names = ", ".join(
+                f"{name} ({position}) {avg_pts:.1f} PPG"
+                for name, position, avg_gs, avg_pts in top_performers
+            )
             st.caption(f"{opp} top performers: {names} *(ranked by Game Score)*")
     else:
         st.caption("No upcoming games scheduled (run ingest.py to refresh the schedule, "
