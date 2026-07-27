@@ -356,19 +356,20 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     age = compute_age(birthdate)
     height_str = format_height(height_in)
 
-    title_col, logo_col = st.columns([8, 1])
     logo_url = team_logo_url(load_team_id(db_path, player_team))
-    with title_col:
-        st.title(bio.player_name)
-        caption_parts = [player_team, f"{bio.position_detail} ({bio.main_position})"]
-        if age is not None:
-            caption_parts.append(f"{age} yrs")
-        if height_str:
-            caption_parts.append(height_str)
-        caption_parts.append(f"{season} season")
-        st.caption(" · ".join(caption_parts))
-    if logo_url:
-        logo_col.image(logo_url, width=72)
+    logo_html = f'<img src="{logo_url}" style="height:2.25rem; margin-left:10px;">' if logo_url else ""
+    st.markdown(
+        f'<div style="display:flex; align-items:center;">'
+        f'<h1 style="margin:0; padding:0;">{bio.player_name}</h1>{logo_html}</div>',
+        unsafe_allow_html=True,
+    )
+    caption_parts = [player_team, f"{bio.position_detail} ({bio.main_position})"]
+    if age is not None:
+        caption_parts.append(f"{age} yrs")
+    if height_str:
+        caption_parts.append(height_str)
+    caption_parts.append(f"{season} season")
+    st.caption(" · ".join(caption_parts))
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Season Avg PTS", f"{played.pts.mean():.1f}")
@@ -397,10 +398,15 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     if next_game:
         opp = next_game["opponent"]
         opp_logo_url = team_logo_url(load_team_id(db_path, opp))
-        ng1, ng_logo, ng2, ng3, ng4, ng5 = st.columns([2, 1, 2, 2, 2, 2])
-        ng1.metric("Opponent", f"{opp} ({next_game['home_away']})")
-        if opp_logo_url:
-            ng_logo.image(opp_logo_url, width=48)
+        opp_logo_html = (f'<img src="{opp_logo_url}" style="height:1.4rem; margin-left:6px; '
+                          f'vertical-align:middle;">' if opp_logo_url else "")
+        ng1, ng2, ng3, ng4, ng5 = st.columns(5)
+        ng1.markdown(
+            f'<div style="font-size:0.875rem; color:rgb(120,120,120);">Opponent</div>'
+            f'<div style="font-size:1.75rem; font-weight:600; line-height:1.2;">'
+            f'{opp} ({next_game["home_away"]}){opp_logo_html}</div>',
+            unsafe_allow_html=True,
+        )
         ng2.metric(f"{opp} Record",
                    f"{next_game['opp_wins']}-{next_game['opp_losses']}"
                    if next_game["opp_wins"] is not None else "N/A")
