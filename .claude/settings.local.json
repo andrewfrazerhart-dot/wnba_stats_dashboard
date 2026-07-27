@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(mkdir -p \"C:\\\\Users\\\\andre\\\\Desktop\\\\wnba_files\\\\.claude\")",
+      "Bash(streamlit run *)",
+      "Bash(curl -s http://localhost:8502)",
+      "Bash(curl -s http://localhost:8502/)",
+      "Bash(python -c \"import streamlit; print\\(streamlit.__version__\\)\")",
+      "Read(//c/Users/andre/.streamlit/**)",
+      "Read(//c//**)",
+      "Read(//c/Users/andre/**)",
+      "mcp__claude-in-chrome__navigate",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "Bash(python -c ' *)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 1852)",
+      "Bash(taskkill //F //PID 11332)"
+    ]
+  }
+}

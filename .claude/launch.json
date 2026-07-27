@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wnba-dashboard",
+      "runtimeExecutable": "streamlit",
+      "runtimeArgs": ["run", "dashboard/app.py", "--server.headless=true", "--", "--db", "data/wnba.db"],
+      "port": 8501
+    }
+  ]
+}
