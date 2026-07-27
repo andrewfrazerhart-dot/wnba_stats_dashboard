@@ -129,6 +129,25 @@ def load_next_game_info(db_path: str, team: str, season: int):
 
 
 @st.cache_data(ttl=300)
+def load_top_performers(db_path: str, team: str, season: int, n: int = 3):
+    """Top n players on `team` this season by average Game Score (played
+    games only) -- used to preview the upcoming opponent's best players."""
+    season = int(season)  # sqlite3 silently fails to match numpy.int64 against an INTEGER column
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        """SELECT p.player_name, AVG(f.game_score) AS avg_gs
+           FROM fact_player_game f JOIN dim_player p ON p.player_id = f.player_id
+           WHERE f.team = ? AND f.season = ? AND f.dnp = 0
+           GROUP BY f.player_id
+           ORDER BY avg_gs DESC
+           LIMIT ?""",
+        (team, season, n),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+@st.cache_data(ttl=300)
 def load_player_bio(db_path: str, player_id: int):
     """birthdate + height_in -- not in v_dashboard (which only pulls
     player_id/name/position from dim_player), so a separate lookup."""
@@ -418,6 +437,11 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
         ng5.metric(f"{player_team} PPG",
                    f"{next_game['team_ppg_for']:.1f}" if next_game["team_ppg_for"] is not None else "N/A")
         st.caption(f"Game date: {next_game['game_date']}")
+
+        top_performers = load_top_performers(db_path, opp, season)
+        if top_performers:
+            names = ", ".join(f"{name} ({avg_gs:.1f})" for name, avg_gs in top_performers)
+            st.caption(f"{opp} top performers: {names} *(ranked by Game Score)*")
     else:
         st.caption("No upcoming games scheduled (run ingest.py to refresh the schedule, "
                    "or the season may be over).")
@@ -427,7 +451,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Threshold hit-rates
     # ---------------------------------------------------------------
-    st.subheader("Threshold Hit-Rates", anchor=f"threshold-hit-rates-{panel_key}")
+    st.subheader("Statistical Threshold Hit Rates", anchor=f"threshold-hit-rates-{panel_key}")
     threshold_stat_label = synced_selectbox(
         st, "Stat", list(THRESHOLD_STAT_OPTIONS.keys()),
         "threshold_stat_shared", f"threshold_stat_inline_{panel_key}")
@@ -454,7 +478,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Stat trend (single stat, selectable)
     # ---------------------------------------------------------------
-    st.subheader("Stat Trend", anchor=f"stat-trend-{panel_key}")
+    st.subheader("Statistical Trends", anchor=f"stat-trend-{panel_key}")
     trend_stat_label = synced_selectbox(
         st, "Stat", list(MAJOR_STATS.keys()),
         "trend_stat_shared", f"trend_stat_inline_{panel_key}")
@@ -481,7 +505,7 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     # ---------------------------------------------------------------
     # Rolling hot / cold trend
     # ---------------------------------------------------------------
-    st.subheader("Rolling Hot / Cold Trend", anchor=f"rolling-hot-cold-trend-{panel_key}")
+    st.subheader("Rolling Hot/Cold Statistical Trends", anchor=f"rolling-hot-cold-trend-{panel_key}")
     hotcoldtrend_stat_label = synced_selectbox(
         st, "Stat", list(MAJOR_STATS.keys()),
         "hotcoldtrend_stat_shared", f"hotcoldtrend_stat_inline_{panel_key}")
@@ -639,11 +663,11 @@ def main():
     st.sidebar.subheader("Chart Settings")
     st.sidebar.caption("Click a name to jump there. Also editable inline, right above each "
                         "chart -- both stay in sync.")
-    synced_selectbox(st.sidebar, "Threshold Hit-Rates", list(THRESHOLD_STAT_OPTIONS.keys()),
+    synced_selectbox(st.sidebar, "Statistical Threshold Hit Rates", list(THRESHOLD_STAT_OPTIONS.keys()),
                       "threshold_stat_shared", "threshold_stat_sidebar", anchor="threshold-hit-rates-p1")
-    synced_selectbox(st.sidebar, "Stat Trend", list(MAJOR_STATS.keys()),
+    synced_selectbox(st.sidebar, "Statistical Trends", list(MAJOR_STATS.keys()),
                       "trend_stat_shared", "trend_stat_sidebar", anchor="stat-trend-p1")
-    synced_selectbox(st.sidebar, "Rolling Hot / Cold Trend", list(MAJOR_STATS.keys()),
+    synced_selectbox(st.sidebar, "Rolling Hot/Cold Statistical Trends", list(MAJOR_STATS.keys()),
                       "hotcoldtrend_stat_shared", "hotcoldtrend_stat_sidebar", anchor="rolling-hot-cold-trend-p1")
     synced_selectbox(st.sidebar, "Hot / Cold Markers", list(HOTCOLD_STAT_OPTIONS.keys()),
                       "hotcold_stat_shared", "hotcold_stat_sidebar", anchor="hot-cold-markers-p1")
