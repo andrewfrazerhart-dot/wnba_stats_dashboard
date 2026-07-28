@@ -96,6 +96,48 @@ consistent." Includes avg minutes, current played-streak (no DNP),
 its chart) and in the sidebar, kept in sync — and most section titles
 in the sidebar are clickable links that jump to that chart.
 
+## Predictive points model
+
+Built on top of the real data pipeline: a leakage-safe model that
+predicts a player's points distribution for her next game, and powers
+a **"Model Fair Probability"** column in the dashboard's Odds
+Calculator alongside the market's own devigged probability.
+
+- **Per-minute rate, not raw points**: separates "how well she scores
+  when on the floor" from "how much she played," then recombines with
+  a simple expected-minutes estimate and a position-relative opponent
+  defense index (points allowed to a position, normalized to league
+  average, capped at ±20 so one thin-sample team -- like a new
+  expansion franchise -- can't swing a prediction too far).
+- **Empirical-Bayes shrinkage** of a player's per-minute rate toward a
+  cross-season prior -- her own prior season if it clears a
+  games-played sanity check (skips injury-shortened seasons
+  automatically), else a position-average fallback for rookies.
+  Shrinkage strength is *estimated from the data itself* (between- vs.
+  within-player variance), not guessed, for both the player-level
+  rate/minutes and the opponent defense index.
+- **A small, hand-maintained injury watchlist**
+  (`MANUAL_OVERRIDES` in `src/points_model.py`) for the handful of
+  players where real-world injury news says the automatic rule needs a
+  nudge -- e.g. trusting a thin-but-healthy return (Napheesa Collier's
+  2026) instead of falling back further, or widening the predicted
+  spread for a player playing through nagging injuries (Caitlin
+  Clark's 2026) instead of just lowering her mean.
+- **Two competing distribution shapes** compared against a naive
+  flat-average baseline via a proper walk-forward backtest
+  (`src/backtest.py`, chronological train/test split, never random):
+  Negative Binomial won on both log loss (0.688 vs. naive's 0.707) and
+  Brier score, and calibrates far more consistently than the naive
+  model, which is badly overconfident at the extremes.
+- Evaluated at a realistic line per player-game (her own predicted
+  mean, rounded to the nearest half point), not one fixed threshold
+  for every player regardless of role.
+
+Deliberately deferred for now: a full second distribution for minutes
+(currently a simple point estimate), pace adjustment on top of the
+opponent index, and per-position/per-usage-tier dispersion instead of
+one global value.
+
 ## Notable technical problems solved along the way
 
 - **Bot-protection bypass** for the ingestion pipeline (see above) —
@@ -131,8 +173,10 @@ in the sidebar are clickable links that jump to that chart.
 
 ## Where things stand
 
-Everything above is built, tested (via Streamlit's headless `AppTest`
-harness against the real database, plus spot-checks against known real
-player stats), committed, and pushed. No open/in-progress work as of
-this writing — the project is in a stable, working state ready for
-normal use (run `ingest.py` periodically, then browse the dashboard).
+Everything above is built, tested (dashboard via Streamlit's headless
+`AppTest` harness plus spot-checks against known real player stats;
+the predictive model via `backtest.py`'s held-out walk-forward
+evaluation plus live browser verification), committed, and pushed. No
+open/in-progress work as of this writing — the project is in a stable,
+working state ready for normal use (run `ingest.py` periodically, then
+browse the dashboard).
