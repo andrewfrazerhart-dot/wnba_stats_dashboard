@@ -229,16 +229,19 @@ CONSISTENCY_STAT_LABELS = {"Points": "Scoring", "Rebounds": "Rebounding", "Assis
 @st.cache_data(ttl=300)
 def get_consistency_tags(db_path: str, player_name: str, season: int) -> list:
     """Which of the 6 major-stat top-30 Consistency Leaderboards (see
-    render_consistency_leaderboard) this player currently appears on,
-    as friendly labels -- e.g. ["Scoring", "Assists"]. Matched by name
-    since load_consistency_leaderboard's output doesn't retain player_id
-    (dropped as the groupby key); WNBA active rosters don't have
-    duplicate names, so this is safe in practice."""
+    render_consistency_leaderboard) this player currently appears on, as
+    (friendly_label, cv_pct) pairs -- e.g. [("Scoring", 22.6), ...].
+    Matched by name since load_consistency_leaderboard's output doesn't
+    retain player_id (dropped as the groupby key); WNBA active rosters
+    don't have duplicate names, so this is safe in practice."""
     tags = []
     for stat_label, stat_col in MAJOR_STATS.items():
         board = load_consistency_leaderboard(db_path, stat_col, season)
-        if not board.empty and player_name in board["player_name"].values:
-            tags.append(CONSISTENCY_STAT_LABELS[stat_label])
+        if board.empty:
+            continue
+        match = board[board["player_name"] == player_name]
+        if not match.empty:
+            tags.append((CONSISTENCY_STAT_LABELS[stat_label], match.iloc[0]["cv_pct"]))
     return tags
 
 
@@ -475,9 +478,19 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
 
     logo_url = team_logo_url(load_team_id(db_path, player_team))
     logo_html = f'<img src="{logo_url}" style="height:2.25rem; margin-left:10px;">' if logo_url else ""
+
+    consistency_tags = get_consistency_tags(db_path, bio.player_name, season)
+    consistency_html = ""
+    if consistency_tags:
+        tags_str = ", ".join(f"{label} ({cv:.1f}%)" for label, cv in consistency_tags)
+        consistency_html = (
+            f'<span style="font-size:1.1rem; margin-left:18px; opacity:0.8;">'
+            f'Consistent in: {tags_str}</span>'
+        )
+
     st.markdown(
-        f'<div id="player-panel-{panel_key}" style="display:flex; align-items:center;">'
-        f'<h1 style="margin:0; padding:0;">{bio.player_name}</h1>{logo_html}</div>',
+        f'<div id="player-panel-{panel_key}" style="display:flex; align-items:center; flex-wrap:wrap;">'
+        f'<h1 style="margin:0; padding:0;">{bio.player_name}</h1>{logo_html}{consistency_html}</div>',
         unsafe_allow_html=True,
     )
     caption_parts = [player_team, f"{bio.position_detail} ({bio.main_position})"]
@@ -510,10 +523,6 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     m6.metric("Games Played", f"{len(played)}")
     m7.metric("Games Missed (DNP)", f"{(season_df.dnp == 1).sum()}")
     m8.metric("Current Played Streak", f"{played_streak(season_df)}")
-
-    consistency_tags = get_consistency_tags(db_path, bio.player_name, season)
-    if consistency_tags:
-        st.caption(f"Consistent in: {', '.join(consistency_tags)}")
 
     next_game = load_next_game_info(db_path, player_team, season)
     st.markdown("**Next Game**")
@@ -793,9 +802,11 @@ def main():
     st.markdown(
         """<style>
         [data-testid="stMetric"] { text-align: center; }
-        [data-testid="stMetric"] > div { align-items: center; justify-content: center; }
+        [data-testid="stMetric"] > div {
+            display: flex; flex-direction: column; align-items: center; width: 100%;
+        }
         [data-testid="stMetricLabel"], [data-testid="stMetricValue"], [data-testid="stMetricDelta"] {
-            display: flex; justify-content: center;
+            display: flex; justify-content: center; width: 100%;
         }
         </style>""",
         unsafe_allow_html=True,
