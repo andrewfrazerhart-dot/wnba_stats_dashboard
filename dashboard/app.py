@@ -222,6 +222,26 @@ def load_consistency_leaderboard(db_path: str, stat_col: str, season: int,
     return agg.sort_values("cv_pct", ascending=True).head(n).reset_index(drop=True)
 
 
+CONSISTENCY_STAT_LABELS = {"Points": "Scoring", "Rebounds": "Rebounding", "Assists": "Assists",
+                           "Steals": "Steals", "Blocks": "Blocks", "Turnovers": "Turnovers"}
+
+
+@st.cache_data(ttl=300)
+def get_consistency_tags(db_path: str, player_name: str, season: int) -> list:
+    """Which of the 6 major-stat top-30 Consistency Leaderboards (see
+    render_consistency_leaderboard) this player currently appears on,
+    as friendly labels -- e.g. ["Scoring", "Assists"]. Matched by name
+    since load_consistency_leaderboard's output doesn't retain player_id
+    (dropped as the groupby key); WNBA active rosters don't have
+    duplicate names, so this is safe in practice."""
+    tags = []
+    for stat_label, stat_col in MAJOR_STATS.items():
+        board = load_consistency_leaderboard(db_path, stat_col, season)
+        if not board.empty and player_name in board["player_name"].values:
+            tags.append(CONSISTENCY_STAT_LABELS[stat_label])
+    return tags
+
+
 @st.cache_data(ttl=300)
 def load_player_bio(db_path: str, player_id: int):
     """birthdate + height_in -- not in v_dashboard (which only pulls
@@ -407,13 +427,16 @@ def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) 
         hit = played[stat_col] >= t
         home_mask = played.home_away == "H"
         away_mask = played.home_away == "A"
+        # NaN, not None -- pandas' Styler.format() crashes trying to apply
+        # a numeric format string to a plain None (found via a real
+        # low-game-count player who had zero away games)
         rows.append({
             "Threshold": f"{t}+ {label}",
-            "Overall": hit.mean() * 100 if len(played) else None,
-            "Home": hit[home_mask].mean() * 100 if home_mask.any() else None,
-            "Away": hit[away_mask].mean() * 100 if away_mask.any() else None,
-            "Last 5": (last5[stat_col] >= t).mean() * 100 if len(last5) else None,
-            "Last 14 Days": (last14d[stat_col] >= t).mean() * 100 if len(last14d) else None,
+            "Overall": hit.mean() * 100 if len(played) else float("nan"),
+            "Home": hit[home_mask].mean() * 100 if home_mask.any() else float("nan"),
+            "Away": hit[away_mask].mean() * 100 if away_mask.any() else float("nan"),
+            "Last 5": (last5[stat_col] >= t).mean() * 100 if len(last5) else float("nan"),
+            "Last 14 Days": (last14d[stat_col] >= t).mean() * 100 if len(last14d) else float("nan"),
         })
     return pd.DataFrame(rows)
 
@@ -486,7 +509,11 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     m6, m7, m8, _spacer = st.columns([1, 1, 1, 3])
     m6.metric("Games Played", f"{len(played)}")
     m7.metric("Games Missed (DNP)", f"{(season_df.dnp == 1).sum()}")
-    m8.metric("Current Played Streak", f"{played_streak(season_df)} game(s)")
+    m8.metric("Current Played Streak", f"{played_streak(season_df)}")
+
+    consistency_tags = get_consistency_tags(db_path, bio.player_name, season)
+    if consistency_tags:
+        st.caption(f"Consistent in: {', '.join(consistency_tags)}")
 
     next_game = load_next_game_info(db_path, player_team, season)
     st.markdown("**Next Game**")
@@ -547,7 +574,8 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     st.plotly_chart(fig, width='stretch', key=f"threshold_chart_{panel_key}")
 
     st.dataframe(
-        hr.style.format({c: "{:.0f}%" for c in ["Overall", "Home", "Away", "Last 5", "Last 14 Days"]}),
+        hr.style.format({c: "{:.0f}%" for c in ["Overall", "Home", "Away", "Last 5", "Last 14 Days"]},
+                        na_rep="N/A"),
         hide_index=True, width='stretch', key=f"threshold_table_{panel_key}",
     )
 
@@ -760,6 +788,18 @@ def sidebar_player_picker(db_path, teams, suffix, label_suffix=""):
 
 def main():
     st.set_page_config(page_title="WNBA Player Stats Dashboard", layout="wide")
+    # center every st.metric's label/value/delta under each other, page-wide
+    # (Streamlit left-aligns them by default with no built-in option to change it)
+    st.markdown(
+        """<style>
+        [data-testid="stMetric"] { text-align: center; }
+        [data-testid="stMetric"] > div { align-items: center; justify-content: center; }
+        [data-testid="stMetricLabel"], [data-testid="stMetricValue"], [data-testid="stMetricDelta"] {
+            display: flex; justify-content: center;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
     st.markdown(
         '<h1 style="text-align:center;">WNBA Player-Game Data Dashboard</h1>',
         unsafe_allow_html=True,
