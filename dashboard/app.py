@@ -596,36 +596,15 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     st.divider()
 
     # ---------------------------------------------------------------
-    # Stat trend (single stat, selectable)
+    # Statistical trend (single stat, selectable). This used to be two
+    # separate sections (a line chart, and a bar chart with home/away
+    # coloring) that plotted the same underlying data -- raw per-game
+    # value, L5/L14D rolling averages, DNP markers -- just styled
+    # differently. Merged into one: the bar version, since home/away
+    # coloring and the season-average line are strictly more informative
+    # than the plain line chart was.
     # ---------------------------------------------------------------
-    st.subheader("Statistical Trends", anchor=f"stat-trend-{panel_key}")
-    trend_stat_label = synced_selectbox(
-        st, "Stat", list(MAJOR_STATS.keys()),
-        "trend_stat_shared", f"trend_stat_inline_{panel_key}")
-    trend_stat_col = MAJOR_STATS[trend_stat_label]
-
-    rolling_df = rolling_prior_averages(season_df, trend_stat_col)
-    played_rolling = rolling_df[rolling_df.dnp == 0]
-
-    fig_trend = go.Figure()
-    fig_trend.add_scatter(x=played_rolling["game_date"], y=played_rolling[trend_stat_col],
-                           name=trend_stat_label, mode="lines+markers")
-    fig_trend.add_scatter(x=rolling_df["game_date"], y=rolling_df["_l5_prior"],
-                           name="L5 avg (entering)", mode="lines", line=dict(dash="dot", color="orange"))
-    fig_trend.add_scatter(x=rolling_df["game_date"], y=rolling_df["_l14d_prior"],
-                           name="L14D avg (entering)", mode="lines", line=dict(dash="dot", color="red"))
-    add_dnp_markers(fig_trend, dnp_games)
-    fig_trend.update_layout(height=380, yaxis_title=trend_stat_label, legend=dict(orientation="h", y=1.15))
-    st.plotly_chart(fig_trend, width='stretch', key=f"trend_chart_{panel_key}")
-    st.caption("Black X = DNP. Rolling lines are leakage-safe (entering each game) and continue "
-               "across DNP gaps, since a missed game doesn't change the average.")
-
-    st.divider()
-
-    # ---------------------------------------------------------------
-    # Rolling hot / cold trend
-    # ---------------------------------------------------------------
-    st.subheader("Rolling Hot/Cold Statistical Trends", anchor=f"rolling-hot-cold-trend-{panel_key}")
+    st.subheader("Statistical Trends", anchor=f"rolling-hot-cold-trend-{panel_key}")
     hotcoldtrend_stat_label = synced_selectbox(
         st, "Stat", list(MAJOR_STATS.keys()),
         "hotcoldtrend_stat_shared", f"hotcoldtrend_stat_inline_{panel_key}")
@@ -821,8 +800,6 @@ def main():
     synced_selectbox(st.sidebar, "Statistical Threshold Hit Rates", list(THRESHOLD_STAT_OPTIONS.keys()),
                       "threshold_stat_shared", "threshold_stat_sidebar", anchor="threshold-hit-rates-p1")
     synced_selectbox(st.sidebar, "Statistical Trends", list(MAJOR_STATS.keys()),
-                      "trend_stat_shared", "trend_stat_sidebar", anchor="stat-trend-p1")
-    synced_selectbox(st.sidebar, "Rolling Hot/Cold Statistical Trends", list(MAJOR_STATS.keys()),
                       "hotcoldtrend_stat_shared", "hotcoldtrend_stat_sidebar", anchor="rolling-hot-cold-trend-p1")
     synced_selectbox(st.sidebar, "Hot / Cold Markers", list(HOTCOLD_STAT_OPTIONS.keys()),
                       "hotcold_stat_shared", "hotcold_stat_sidebar", anchor="hot-cold-markers-p1")
