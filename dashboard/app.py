@@ -20,6 +20,15 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from points_model import (  # noqa: E402
+    fit_production_params,
+    load_games as load_model_games,
+    predict_upcoming_game,
+    prob_over_empirical,
+    prob_over_nb,
+)
+
 DEFAULT_DB = "../data/wnba.db"
 HOT_COLD_MIN_GAMES = 5  # min prior played games before a hot/cold read is shown
 TEAM_LOGO_URL = "https://cdn.wnba.com/logos/wnba/{team_id}/primary/L/logo.svg"
@@ -267,6 +276,18 @@ def load_team_id(db_path: str, team: str):
 
 def team_logo_url(team_id):
     return TEAM_LOGO_URL.format(team_id=team_id) if team_id else None
+
+
+@st.cache_data(ttl=300)
+def load_model_params(db_path: str):
+    """Fits the points-prediction model's nuisance parameters (shrinkage
+    strength, NB dispersion, opponent defense index, etc.) on the full
+    history -- see src/points_model.py and src/backtest.py (the latter
+    is where this model was actually validated, via a held-out
+    walk-forward backtest; this just re-fits the same pipeline on
+    everything for the best current live estimate)."""
+    df = load_model_games(db_path)
+    return fit_production_params(df)
 
 
 def compute_age(birthdate_str):
@@ -634,9 +655,39 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
         "Under odds (American)", value=-110, step=5, key=f"odds_under_{panel_key}")
 
     fair_over, fair_under = devig_two_way(over_odds, under_odds)
-    fm1, fm2 = st.columns(2)
+
+    # Model fair probability (see src/points_model.py) -- points only for
+    # now; the shrinkage/opponent-index pipeline was only built for pts.
+    model_fair_over = None
+    model_note = None
+    if threshold_col == "pts":
+        if next_game:
+            model_params = load_model_params(db_path)
+            pred = predict_upcoming_game(model_params, player_id, next_game["opponent"])
+            if pred:
+                model_fair_over = prob_over_nb(pred["predicted_mean_pts"], pred["r_nb"], odds_line)
+                model_note = (
+                    f"Model projects {pred['predicted_mean_pts']:.1f} pts vs {next_game['opponent']} "
+                    f"(opponent defense index {pred['opponent_index']:.0f} = 100 is league-average; "
+                    f"{pred['n_prior_games']} games into her season so far)."
+                )
+                if pred["variance_inflation"] != 1.0:
+                    model_note += (
+                        f" Distribution widened {pred['variance_inflation']:.1f}x -- "
+                        "known current injury concerns (see watchlist in points_model.py)."
+                    )
+        else:
+            model_note = "Model needs a scheduled next game to project against -- none found."
+
+    if model_fair_over is not None:
+        fm1, fm2, fm3 = st.columns(3)
+    else:
+        fm1, fm2 = st.columns(2)
     fm1.metric("Market Fair Prob (Over)", f"{fair_over * 100:.1f}%")
     fm2.metric("Market Fair Prob (Under)", f"{fair_under * 100:.1f}%")
+    if model_fair_over is not None:
+        fm3.metric("Model Fair Prob (Over)", f"{model_fair_over * 100:.1f}%",
+                   delta=f"{(model_fair_over - fair_over) * 100:+.1f} vs market")
 
     odds_last5 = played.tail(5)
     odds_most_recent_date = played["game_date"].max()
@@ -645,20 +696,34 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     odds_rows = []
     for window_label, window_df in [("Season", played), ("Last 5", odds_last5), ("Last 14 Days", odds_last14d)]:
         your_over = (window_df[threshold_col] > odds_line).mean() * 100 if len(window_df) else float("nan")
-        odds_rows.append({
+        row = {
             "Window": window_label, "Games": len(window_df), "Your Over %": your_over,
             "Market Fair Over %": fair_over * 100, "Edge (pts)": your_over - fair_over * 100,
-        })
+        }
+        if model_fair_over is not None:
+            row["Model Fair Over %"] = model_fair_over * 100
+            row["Model Edge (pts)"] = your_over - model_fair_over * 100
+        odds_rows.append(row)
+
+    format_dict = {
+        "Your Over %": "{:.1f}%", "Market Fair Over %": "{:.1f}%", "Edge (pts)": "{:+.1f}",
+        "Model Fair Over %": "{:.1f}%", "Model Edge (pts)": "{:+.1f}",
+    }
     st.dataframe(
-        pd.DataFrame(odds_rows).style.format({
-            "Your Over %": "{:.1f}%", "Market Fair Over %": "{:.1f}%", "Edge (pts)": "{:+.1f}",
-        }, na_rep="N/A"),
+        pd.DataFrame(odds_rows).style.format(format_dict, na_rep="N/A"),
         hide_index=True, width='stretch', key=f"odds_calc_table_{panel_key}",
     )
-    st.caption("Edge = your historical Over rate minus the market's devigged fair Over probability, "
-               "in percentage points. Positive means your data says Over hits more often than the "
-               "market implies. A whole-number line can push in real betting (not modeled here) -- "
-               "use a half-point line like sportsbooks do to avoid that.")
+    st.caption("Edge = your historical Over rate minus the (devigged) fair Over probability, in "
+               "percentage points -- Market uses the sportsbook odds entered above; Model uses this "
+               "dashboard's own prediction (negative binomial, backtested in src/backtest.py -- see "
+               "PROJECT_STATUS.md). Positive means that side's fair probability says Over hits more "
+               "often than your own history shows. A whole-number line can push in real betting (not "
+               "modeled here) -- use a half-point line like sportsbooks do to avoid that.")
+    if model_note:
+        st.caption(model_note)
+    elif threshold_col != "pts":
+        st.caption("Model Fair Probability currently only covers Points -- switch the Stat picker "
+                   "above to Points to see it.")
 
     st.divider()
 
