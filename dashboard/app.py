@@ -444,6 +444,27 @@ def hit_rate_table(played: pd.DataFrame, stat_col: str, thresholds, label: str) 
     return pd.DataFrame(rows)
 
 
+def american_odds_to_implied_prob(odds: float) -> float:
+    """Standard American-odds-to-probability conversion. Includes the
+    sportsbook's vig -- this is the RAW implied probability, not the
+    fair one (see devig_two_way)."""
+    if odds >= 0:
+        return 100.0 / (odds + 100.0)
+    return -odds / (-odds + 100.0)
+
+
+def devig_two_way(over_odds: float, under_odds: float):
+    """Removes the vig via the standard proportional method: normalize
+    both sides' raw implied probabilities so they sum to 100%. Simpler
+    than Shin's method or a power devig, but appropriate for a manual,
+    phase-1 tool -- "simpler is better all else equal." Returns
+    (fair_over_prob, fair_under_prob), each in [0, 1]."""
+    p_over_raw = american_odds_to_implied_prob(over_odds)
+    p_under_raw = american_odds_to_implied_prob(under_odds)
+    overround = p_over_raw + p_under_raw
+    return p_over_raw / overround, p_under_raw / overround
+
+
 def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1"):
     """Renders one player's full panel: header, all charts, game log.
     `compact=True` (used in compare mode, where two of these sit side by
@@ -587,6 +608,57 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
                         na_rep="N/A"),
         hide_index=True, width='stretch', key=f"threshold_table_{panel_key}",
     )
+
+    # ---------------------------------------------------------------
+    # Odds calculator (manual entry, phase 1 of the predictive-model
+    # project discussed separately) -- devigs a sportsbook line against
+    # this player's actual history for whichever stat is selected above.
+    # ---------------------------------------------------------------
+    st.markdown("**Odds Calculator (manual entry)**")
+    st.caption("Enter a sportsbook line and American odds to compare this player's actual history "
+               "against the market's no-vig (devigged) fair probability. Uses the same stat as the "
+               "table above, so switching the Stat picker updates this too.")
+
+    default_line = round(played[threshold_col].mean() * 2) / 2
+    oc1, oc2, oc3 = st.columns(3)
+    odds_line = oc1.number_input(
+        f"{threshold_stat_label} line", value=float(default_line), step=0.5, format="%.1f",
+        # keyed per-stat (not just per-panel): a number_input remembers its
+        # own value once created and ignores new `value=` defaults on later
+        # runs, so without this a Points-appropriate line would silently
+        # stick around after switching to Rebounds via the Stat picker above
+        key=f"odds_line_{panel_key}_{threshold_col}")
+    over_odds = oc2.number_input(
+        "Over odds (American)", value=-110, step=5, key=f"odds_over_{panel_key}")
+    under_odds = oc3.number_input(
+        "Under odds (American)", value=-110, step=5, key=f"odds_under_{panel_key}")
+
+    fair_over, fair_under = devig_two_way(over_odds, under_odds)
+    fm1, fm2 = st.columns(2)
+    fm1.metric("Market Fair Prob (Over)", f"{fair_over * 100:.1f}%")
+    fm2.metric("Market Fair Prob (Under)", f"{fair_under * 100:.1f}%")
+
+    odds_last5 = played.tail(5)
+    odds_most_recent_date = played["game_date"].max()
+    odds_last14d = played[played["game_date"] >= odds_most_recent_date - pd.Timedelta(days=14)]
+
+    odds_rows = []
+    for window_label, window_df in [("Season", played), ("Last 5", odds_last5), ("Last 14 Days", odds_last14d)]:
+        your_over = (window_df[threshold_col] > odds_line).mean() * 100 if len(window_df) else float("nan")
+        odds_rows.append({
+            "Window": window_label, "Games": len(window_df), "Your Over %": your_over,
+            "Market Fair Over %": fair_over * 100, "Edge (pts)": your_over - fair_over * 100,
+        })
+    st.dataframe(
+        pd.DataFrame(odds_rows).style.format({
+            "Your Over %": "{:.1f}%", "Market Fair Over %": "{:.1f}%", "Edge (pts)": "{:+.1f}",
+        }, na_rep="N/A"),
+        hide_index=True, width='stretch', key=f"odds_calc_table_{panel_key}",
+    )
+    st.caption("Edge = your historical Over rate minus the market's devigged fair Over probability, "
+               "in percentage points. Positive means your data says Over hits more often than the "
+               "market implies. A whole-number line can push in real betting (not modeled here) -- "
+               "use a half-point line like sportsbooks do to avoid that.")
 
     st.divider()
 
