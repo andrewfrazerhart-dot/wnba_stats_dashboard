@@ -25,8 +25,7 @@ from points_model import (  # noqa: E402
     fit_production_params,
     load_games as load_model_games,
     predict_upcoming_game,
-    prob_over_empirical,
-    prob_over_nb,
+    prob_over_blend,
 )
 
 DEFAULT_DB = "../data/wnba.db"
@@ -665,7 +664,10 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
             model_params = load_model_params(db_path)
             pred = predict_upcoming_game(model_params, player_id, next_game["opponent"])
             if pred:
-                model_fair_over = prob_over_nb(pred["predicted_mean_pts"], pred["r_nb"], odds_line)
+                model_fair_over = prob_over_blend(
+                    pred["predicted_mean_pts"], pred["r_nb"], pred["ratio_pool"], odds_line,
+                    inflation=pred["variance_inflation"],
+                )
                 model_note = (
                     f"Model projects {pred['predicted_mean_pts']:.1f} pts vs {next_game['opponent']} "
                     f"(opponent defense index {pred['opponent_index']:.0f} = 100 is league-average; "
@@ -715,9 +717,10 @@ def render_player_panel(db_path, player_id, season, compact=False, panel_key="p1
     )
     st.caption("Edge = your historical Over rate minus the (devigged) fair Over probability, in "
                "percentage points -- Market uses the sportsbook odds entered above; Model uses this "
-               "dashboard's own prediction (negative binomial, backtested in src/backtest.py -- see "
-               "PROJECT_STATUS.md). Positive means that side's fair probability says Over hits more "
-               "often than your own history shows. A whole-number line can push in real betting (not "
+               "dashboard's own prediction (blend of a negative binomial and an empirical model, "
+               "backtested in src/backtest.py -- see PROJECT_STATUS.md). Positive means that side's "
+               "fair probability says Over hits more often than your own history shows. A whole-number "
+               "line can push in real betting (not "
                "modeled here) -- use a half-point line like sportsbooks do to avoid that.")
     if model_note:
         st.caption(model_note)

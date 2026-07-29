@@ -446,6 +446,20 @@ def prob_over_empirical(mean, ratio_pool, line, inflation=1.0):
     return float(np.mean(scaled > line))
 
 
+def prob_over_blend(mean, r, ratio_pool, line, inflation=1.0):
+    """Straight average of the NB and empirical probabilities -- see
+    backtest.py. NB alone assumes more skew than the data shows;
+    empirical alone (pooled across all players) washes the skew out
+    almost entirely. Averaging the two beat both individually on log
+    loss, Brier score, and calibration in the walk-forward backtest.
+    (A train-fit blend weight was tried instead of a flat 50/50 average
+    and did worse out of sample -- overfit train-fold noise, same as
+    the dispersion-bucketing and isotonic-recalibration attempts.)"""
+    p_nb = prob_over_nb(mean, r, line)
+    p_emp = prob_over_empirical(mean, ratio_pool, line, inflation=inflation)
+    return (p_nb + p_emp) / 2
+
+
 def fit_nb_dispersion(train_df, mean_col, actual_col="pts"):
     resid = train_df[actual_col] - train_df[mean_col]
     mean_pred = train_df[mean_col].mean()

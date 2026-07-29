@@ -1,7 +1,7 @@
 """
 backtest.py
 
-Walk-forward evaluation of three competing points-prediction models:
+Walk-forward evaluation of four competing points-prediction models:
   - naive     : flat within-season average, single pooled SD, no
                 shrinkage / no opponent adjustment / no minutes split.
                 The "did any of the machinery actually help" baseline.
@@ -9,6 +9,37 @@ Walk-forward evaluation of three competing points-prediction models:
                 in a Negative Binomial shape.
   - empirical : the same shrunk mean, but with an empirical/nonparametric
                 residual-ratio pool instead of an assumed NB shape.
+  - blend     : straight average of nb and empirical's P(over). Added
+                after noticing the two disagree in OPPOSITE directions
+                from the true rate (NB assumes too much skew, empirical
+                pools across all players and washes out skew almost
+                entirely) -- averaging cancels most of that bias and
+                beat both individual models on log loss/Brier/calibration.
+
+An extensive, deliberately exhaustive round of follow-up attempts to
+beat this blend did NOT succeed and are not part of this file:
+  - CV-bucketed NB dispersion, residual-based dispersion bucketing
+  - Post-hoc isotonic recalibration (made held-out log loss worse --
+    overfit train-fold noise)
+  - A train-fit blend weight vs. the flat 50/50 average (same failure)
+  - Skew-normal (independent skewness parameter) -- beat plain NB but
+    not the blend; realized sample skewness (~1.51) exceeds what
+    skew-normal can represent at all (max ~0.995)
+  - Skew-t (adds independent tail-weight) -- matched the true skewness
+    and kurtosis closely via method-of-moments, but still didn't beat
+    the blend; more accurate moments didn't translate to better
+    calibration, likely because kurtosis (a 4th moment) is itself too
+    noisy a statistic to trust at this data size
+  - Quantile regression (points ~ predicted_mean_pts) -- alone, similar
+    to empirical; blended with NB, nominally beat the blend by 0.0005 in
+    log loss, judged noise-level given a single train/test split and
+    not adopted
+
+Across nine variations, the plain 50/50 NB+empirical blend won or tied
+within noise every time -- treated as a real, well-earned ceiling for
+probability-level tuning at this data size, not a failure to try hard
+enough. See PROJECT_STATUS.md / session notes for the full reasoning;
+not re-adding any of that code since none of it earned its keep.
 
 Split: chronological, not random (train = 2024 + first 70% of 2025 by
 date; test = remainder of 2025 + all of 2026). Every per-row prediction
@@ -30,7 +61,6 @@ Usage:
 """
 
 import argparse
-import math
 
 import numpy as np
 import pandas as pd
@@ -93,13 +123,14 @@ def evaluate(df, db_path):
 
     probs = test.apply(row_probs, axis=1)
     test = pd.concat([test, probs], axis=1)
+    test["p_blend"] = (test["p_nb"] + test["p_emp"]) / 2
 
     print(f"\nTrain rows: {len(train)}   Test rows: {len(test)}   Split date: {cutoff.date()}")
-    print(f"Shrinkage k (rate): fit inside build_feature_table   NB dispersion r: {r_nb:.2f}")
+    print(f"Global NB dispersion r: {r_nb:.2f}")
     print(f"Empirical residual pool size: {len(ratio_pool)}")
 
     print("\n--- Log loss / Brier score (lower is better) ---")
-    for name, col in [("naive", "p_naive"), ("negative binomial", "p_nb"), ("empirical", "p_emp")]:
+    for name, col in [("naive", "p_naive"), ("negative binomial", "p_nb"), ("empirical", "p_emp"), ("blend", "p_blend")]:
         p = test[col].clip(EPS, 1 - EPS)
         y = test["actual_over"]
         logloss = -(y * np.log(p) + (1 - y) * np.log(1 - p)).mean()
@@ -107,7 +138,7 @@ def evaluate(df, db_path):
         print(f"  {name:20s}  log loss={logloss:.4f}   brier={brier:.4f}")
 
     print("\n--- Calibration (predicted vs. actual 'over' rate, by decile) ---")
-    for name, col in [("naive", "p_naive"), ("negative binomial", "p_nb"), ("empirical", "p_emp")]:
+    for name, col in [("naive", "p_naive"), ("negative binomial", "p_nb"), ("empirical", "p_emp"), ("blend", "p_blend")]:
         print(f"\n  {name}:")
         bins = pd.qcut(test[col], 10, duplicates="drop")
         cal = test.groupby(bins, observed=True).agg(
@@ -129,6 +160,7 @@ def evaluate(df, db_path):
             f"  {name} ({row['game_date'].date()}): predicted_mean={row['predicted_mean_pts']:.1f} pts, "
             f"line={row['line']}, actual={row['pts']}, "
             f"P(over)_nb={row['p_nb']*100:.1f}%, P(over)_emp={row['p_emp']*100:.1f}%, "
+            f"P(over)_blend={row['p_blend']*100:.1f}%, "
             f"variance_inflation={row['variance_inflation']}"
         )
 
